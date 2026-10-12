@@ -130,8 +130,13 @@ async def fetch_ads_via_browser(search_url: str) -> list[dict]:
                 if not item_id:
                     continue
 
-                title_elem = await card.query_selector('h3[itemprop="name"]')
-                title = await title_elem.inner_text() if title_elem else "Без названия"
+                # Улучшенный поиск названия
+                title_elem = await card.query_selector('h3[itemprop="name"], a[data-marker="item-title"] h3, h3[class*="title"]')
+                if title_elem:
+                    title = await title_elem.inner_text()
+                else:
+                    link_elem = await card.query_selector('a[data-marker="item-title"]')
+                    title = await link_elem.inner_text() if link_elem else "Без названия"
 
                 link_elem = await card.query_selector('a[data-marker="item-title"]')
                 raw_href = await link_elem.get_attribute("href") if link_elem else ""
