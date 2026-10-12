@@ -15,7 +15,7 @@ from playwright.async_api import async_playwright
 
 # ================= 1. НАСТРОЙКИ =================
 BOT_TOKEN = "8735276903:AAH-0nm_PSEaMHZ3Bqk76rAKDZArYlpLfoc"
-CHECK_INTERVAL_SECONDS = 40  # Пауза между проверками
+CHECK_INTERVAL_SECONDS = 40  # Оптимальная задержка между проверками
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -76,7 +76,7 @@ def mark_item_as_seen(item_id: str):
     conn.commit()
     conn.close()
 
-# ================= 3. ПАРСИНГ ЧЕРЕЗ БРАУЗЕР =================
+# ================= 3. ПАРСИНГ ЧЕРЕЗ БРАУЗЕР (ОБХОД 403) =================
 def format_avito_url(url: str) -> str:
     """Гарантирует сортировку по дате (s=104)."""
     parsed = urlparse(url)
@@ -85,64 +85,66 @@ def format_avito_url(url: str) -> str:
     new_query = urlencode(query, doseq=True)
     return urlunparse(parsed._replace(query=new_query))
 
-async def fetch_ads_page(context, search_url: str) -> list[dict]:
+async def fetch_ads_via_browser(search_url: str) -> list[dict]:
     target_url = format_avito_url(search_url)
     results = []
-    page = None
 
     try:
-        page = await context.new_page()
-        response = await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-        
-        if response and response.status == 403:
-            logging.warning("Сайт вернул 403.")
-            return []
+        async with async_playwright() as p:
+            # Запускаем браузер с параметрами обхода детекта автоматизации
+            browser = await p.chromium.launch(
+                headless=True,
+                channel="chrome",
+                args=["--disable-blink-features=AutomationControlled"]
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
+            )
+            page = await context.new_page()
 
-        await asyncio.sleep(2)
-        cards = await page.query_selector_all('div[data-marker="item"]')
+            # Переходим по ссылке
+            response = await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            
+            if response and response.status == 403:
+                logging.warning("Сайт вернул 403 даже в браузере. Попробуйте раздать интернет с телефона.")
+                await browser.close()
+                return []
 
-        for card in cards[:10]:
-            item_id = await card.get_attribute("data-item-id")
-            if not item_id:
-                continue
+            # Ждём пару секунд для отрисовки карточек
+            await asyncio.sleep(3)
 
-            # Поиск названия
-            title_elem = await card.query_selector('h3[itemprop="name"], a[data-marker="item-title"] h3, h3')
-            title = await title_elem.inner_text() if title_elem else "Без названия"
+            cards = await page.query_selector_all('div[data-marker="item"]')
 
-            link_elem = await card.query_selector('a[data-marker="item-title"]')
-            raw_href = await link_elem.get_attribute("href") if link_elem else ""
-            url = f"https://www.avito.ru{raw_href}" if raw_href.startswith("/") else raw_href
+            for card in cards[:10]:
+                item_id = await card.get_attribute("data-item-id")
+                if not item_id:
+                    continue
 
-            price_meta = await card.query_selector('meta[itemprop="price"]')
-            price = 0
-            if price_meta:
-                val = await price_meta.get_attribute("content")
-                if val:
-                    price = int(val)
+                title_elem = await card.query_selector('h3[itemprop="name"]')
+                title = await title_elem.inner_text() if title_elem else "Без названия"
 
-            # Поиск фото
-            photo_url = None
-            try:
-                img_elem = await card.query_selector('img[itemprop="image"], img[class*="photo"], img')
-                if img_elem:
-                    photo_url = await img_elem.get_attribute("src")
-            except Exception:
-                pass
+                link_elem = await card.query_selector('a[data-marker="item-title"]')
+                raw_href = await link_elem.get_attribute("href") if link_elem else ""
+                url = f"https://www.avito.ru{raw_href}" if raw_href.startswith("/") else raw_href
 
-            results.append({
-                "id": item_id,
-                "title": title.strip(),
-                "price": price,
-                "url": url,
-                "photo_url": photo_url
-            })
+                price_meta = await card.query_selector('meta[itemprop="price"]')
+                price = 0
+                if price_meta:
+                    val = await price_meta.get_attribute("content")
+                    if val:
+                        price = int(val)
 
+                results.append({
+                    "id": item_id,
+                    "title": title.strip(),
+                    "price": price,
+                    "url": url
+                })
+
+            await browser.close()
     except Exception as e:
-        logging.error(f"Ошибка при загрузке страницы: {e}")
-    finally:
-        if page:
-            await page.close()
+        logging.error(f"Ошибка при работе браузера: {e}")
 
     return results
 
@@ -166,7 +168,7 @@ async def cmd_start(msg: Message):
 
 @dp.message(Command("add"))
 async def cmd_add(msg: Message, state: FSMContext):
-    await msg.answer("🔗 Отправьте <b>ссылку на поиск с Авито</b>:", parse_mode="HTML")
+    await msg.answer("🔗 Отправьте <b>ссылку на поиск с Авито</b> (настройте фильтры и скопируйте ссылку из браузера):", parse_mode="HTML")
     await state.set_state(SearchForm.waiting_for_url)
 
 @dp.message(SearchForm.waiting_for_url)
@@ -177,7 +179,7 @@ async def process_url(msg: Message, state: FSMContext):
         return
 
     await state.update_data(url=url)
-    await msg.answer("💰 Введите <b>максимальную цену</b> в рублях:", parse_mode="HTML")
+    await msg.answer("💰 Теперь введите <b>максимальную цену</b> в рублях (например: <code>35000</code>):", parse_mode="HTML")
     await state.set_state(SearchForm.waiting_for_price)
 
 @dp.message(SearchForm.waiting_for_price)
@@ -196,7 +198,7 @@ async def process_price(msg: Message, state: FSMContext):
     await msg.answer(
         f"✅ <b>Поиск успешно добавлен!</b>\n"
         f"💰 Макс. цена: {max_price:,} ₽\n\n"
-        f"Бот отслеживает свежие лоты.",
+        f"Бот начал отслеживать свежие лоты по вашей ссылке.",
         parse_mode="HTML"
     )
 
@@ -232,72 +234,32 @@ async def delete_callback(callback: CallbackQuery):
 async def monitor_task():
     while True:
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-blink-features=AutomationControlled"
-                    ]
-                )
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    viewport={"width": 1280, "height": 800}
-                )
+            searches = get_all_searches()
+            for s_id, user_id, url, max_price in searches:
+                items = await fetch_ads_via_browser(url)
+                for item in items:
+                    item_id = item["id"]
 
-                # Держим браузер открытым на протяжении нескольких циклов проверки
-                for _ in range(15):
-                    searches = get_all_searches()
-                    for s_id, user_id, url, max_price in searches:
-                        items = await fetch_ads_page(context, url)
-                        for item in items:
-                            item_id = item["id"]
+                    if not is_item_seen(item_id):
+                        mark_item_as_seen(item_id)
 
-                            if not is_item_seen(item_id):
-                                mark_item_as_seen(item_id)
+                        if item["price"] <= max_price and item["price"] > 0:
+                            text = (
+                                f"🔥 <b>Новое объявление!</b>\n\n"
+                                f"📌 {item['title']}\n"
+                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n\n"
+                                f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
+                            )
+                            try:
+                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                            except Exception as err:
+                                logging.error(f"Ошибка отправки сообщения: {err}")
 
-                                if 0 < item["price"] <= max_price:
-                                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                                        [InlineKeyboardButton(text="🔗 Открыть на Авито", url=item['url'])]
-                                    ])
-                                    
-                                    caption_text = (
-                                        f"🔥 <b>Новое объявление!</b>\n\n"
-                                        f"📱 <b>{item['title']}</b>\n"
-                                        f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
-                                    )
-
-                                    try:
-                                        if item.get('photo_url') and item['photo_url'].startswith("http"):
-                                            await bot.send_photo(
-                                                chat_id=user_id,
-                                                photo=item['photo_url'],
-                                                caption=caption_text,
-                                                parse_mode="HTML",
-                                                reply_markup=keyboard
-                                            )
-                                        else:
-                                            await bot.send_message(
-                                                chat_id=user_id,
-                                                text=caption_text,
-                                                parse_mode="HTML",
-                                                reply_markup=keyboard
-                                            )
-                                    except Exception as err:
-                                        logging.error(f"Ошибка отправки: {err}")
-
-                        await asyncio.sleep(4)
-
-                    await asyncio.sleep(CHECK_INTERVAL_SECONDS)
-
-                # Мягкий плановый перезапуск браузера раз в ~10 минут для очистки памяти
-                await browser.close()
-
+                await asyncio.sleep(5)  # Небольшая пауза между проверками разных ссылок
         except Exception as e:
             logging.error(f"Ошибка в цикле мониторинга: {e}")
-            await asyncio.sleep(10)
+
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 # ================= 6. ТОЧКА ВХОДА =================
 async def main():
