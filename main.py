@@ -91,11 +91,20 @@ async def fetch_ads_via_browser(search_url: str) -> list[dict]:
 
     try:
         async with async_playwright() as p:
-            # Запускаем браузер с параметрами обхода детекта автоматизации
+            # Запускаем браузер в максимально легком режиме для слабого хостинга
             browser = await p.chromium.launch(
                 headless=True,
                 channel="chrome",
-                args=["--disable-blink-features=AutomationControlled"]
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-crash-reporter",
+                    "--no-zygote",
+                    "--single-process"
+                ]
             )
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
