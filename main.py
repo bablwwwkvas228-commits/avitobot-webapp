@@ -135,11 +135,19 @@ async def fetch_ads_via_browser(search_url: str) -> list[dict]:
                     if val:
                         price = int(val)
 
+                # Ищем ссылку на фотографию
+                try:
+                    img_element = await card.query_selector('img[itemprop="image"], img[class*="photo"], img')
+                    photo_url = await img_element.get_attribute("src") if img_element else None
+                except Exception:
+                    photo_url = None
+
                 results.append({
                     "id": item_id,
                     "title": title.strip(),
                     "price": price,
-                    "url": url
+                    "url": url,
+                    "photo_url": photo_url
                 })
 
             await browser.close()
@@ -244,14 +252,38 @@ async def monitor_task():
                         mark_item_as_seen(item_id)
 
                         if item["price"] <= max_price and item["price"] > 0:
-                            text = (
-                                f"🔥 <b>Новое объявление!</b>\n\n"
-                                f"📌 {item['title']}\n"
-                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n\n"
-                                f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
+                            # Формируем кнопку перехода
+                            keyboard = InlineKeyboardMarkup(
+                                inline_keyboard=[
+                                    [InlineKeyboardButton(text="🔗 Открыть на Авито", url=item['url'])]
+                                ]
                             )
+                            
+                            # Формируем текст
+                            caption_text = (
+                                f"🔥 <b>Новое объявление!</b>\n\n"
+                                f"📱 <b>{item['title']}</b>\n"
+                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
+                            )
+
                             try:
-                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                                # Отправляем с фото, если оно есть
+                                if item.get('photo_url') and item['photo_url'].startswith("http"):
+                                    await bot.send_photo(
+                                        chat_id=user_id,
+                                        photo=item['photo_url'],
+                                        caption=caption_text,
+                                        parse_mode="HTML",
+                                        reply_markup=keyboard
+                                    )
+                                # Иначе отправляем просто текст
+                                else:
+                                    await bot.send_message(
+                                        chat_id=user_id,
+                                        text=caption_text,
+                                        parse_mode="HTML",
+                                        reply_markup=keyboard
+                                    )
                             except Exception as err:
                                 logging.error(f"Ошибка отправки сообщения: {err}")
 
