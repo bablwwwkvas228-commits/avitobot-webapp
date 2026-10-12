@@ -11,11 +11,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from playwright.async_api import async_playwright
+from curl_cffi.requests import AsyncSession
+from bs4 import BeautifulSoup
 
 # ================= 1. НАСТРОЙКИ =================
 BOT_TOKEN = "8735276903:AAH-0nm_PSEaMHZ3Bqk76rAKDZArYlpLfoc"
-CHECK_INTERVAL_SECONDS = 40  # Оптимальная задержка между проверками
+CHECK_INTERVAL_SECONDS = 40  # Пауза между проверками
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -76,7 +77,7 @@ def mark_item_as_seen(item_id: str):
     conn.commit()
     conn.close()
 
-# ================= 3. ПАРСИНГ ЧЕРЕЗ БРАУЗЕР (ОБХОД 403) =================
+# ================= 3. ЛЁГКИЙ ПАРСИНГ БЕЗ БРАУЗЕРА =================
 def format_avito_url(url: str) -> str:
     """Гарантирует сортировку по дате (s=104)."""
     parsed = urlparse(url)
@@ -85,66 +86,73 @@ def format_avito_url(url: str) -> str:
     new_query = urlencode(query, doseq=True)
     return urlunparse(parsed._replace(query=new_query))
 
-async def fetch_ads_via_browser(search_url: str) -> list[dict]:
+async def fetch_ads_direct(search_url: str) -> list[dict]:
     target_url = format_avito_url(search_url)
     results = []
 
-    try:
-        async with async_playwright() as p:
-            # Запускаем браузер с параметрами обхода детекта автоматизации
-            browser = await p.chromium.launch(
-                headless=True,
-                channel="chrome",
-                args=["--disable-blink-features=AutomationControlled"]
-            )
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800}
-            )
-            page = await context.new_page()
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Upgrade-Insecure-Requests": "1",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    }
 
-            # Переходим по ссылке
-            response = await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+    try:
+        async with AsyncSession(impersonate="chrome120") as session:
+            resp = await session.get(target_url, headers=headers, timeout=20)
             
-            if response and response.status == 403:
-                logging.warning("Сайт вернул 403 даже в браузере. Попробуйте раздать интернет с телефона.")
-                await browser.close()
+            if resp.status_code == 403:
+                logging.warning("⚠️ Авито вернуло 403 (блокировка запроса).")
+                return []
+            
+            if resp.status_code != 200:
+                logging.warning(f"Код ответа страницы: {resp.status_code}")
                 return []
 
-            # Ждём пару секунд для отрисовки карточек
-            await asyncio.sleep(3)
-
-            cards = await page.query_selector_all('div[data-marker="item"]')
+            soup = BeautifulSoup(resp.text, "html.parser")
+            cards = soup.select('div[data-marker="item"]')
 
             for card in cards[:10]:
-                item_id = await card.get_attribute("data-item-id")
+                item_id = card.get("data-item-id")
                 if not item_id:
                     continue
 
-                title_elem = await card.query_selector('h3[itemprop="name"]')
-                title = await title_elem.inner_text() if title_elem else "Без названия"
+                # Название лота
+                title_elem = (
+                    card.select_one('h3[itemprop="name"]') or
+                    card.select_one('a[data-marker="item-title"] h3') or
+                    card.select_one('h3')
+                )
+                title = title_elem.get_text(strip=True) if title_elem else "Без названия"
 
-                link_elem = await card.query_selector('a[data-marker="item-title"]')
-                raw_href = await link_elem.get_attribute("href") if link_elem else ""
+                # Ссылка на лот
+                link_elem = card.select_one('a[data-marker="item-title"]')
+                raw_href = link_elem.get("href") if link_elem else ""
                 url = f"https://www.avito.ru{raw_href}" if raw_href.startswith("/") else raw_href
 
-                price_meta = await card.query_selector('meta[itemprop="price"]')
-                price = 0
-                if price_meta:
-                    val = await price_meta.get_attribute("content")
-                    if val:
-                        price = int(val)
+                # Цена
+                price_meta = card.select_one('meta[itemprop="price"]')
+                price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
+
+                # Фотография
+                photo_url = None
+                img_elem = card.select_one('img[itemprop="image"]') or card.select_one('img')
+                if img_elem:
+                    photo_url = img_elem.get("src")
 
                 results.append({
                     "id": item_id,
-                    "title": title.strip(),
+                    "title": title,
                     "price": price,
-                    "url": url
+                    "url": url,
+                    "photo_url": photo_url
                 })
 
-            await browser.close()
     except Exception as e:
-        logging.error(f"Ошибка при работе браузера: {e}")
+        logging.error(f"Ошибка прямого запроса: {e}")
 
     return results
 
@@ -168,7 +176,7 @@ async def cmd_start(msg: Message):
 
 @dp.message(Command("add"))
 async def cmd_add(msg: Message, state: FSMContext):
-    await msg.answer("🔗 Отправьте <b>ссылку на поиск с Авито</b> (настройте фильтры и скопируйте ссылку из браузера):", parse_mode="HTML")
+    await msg.answer("🔗 Отправьте <b>ссылку на поиск с Авито</b>:", parse_mode="HTML")
     await state.set_state(SearchForm.waiting_for_url)
 
 @dp.message(SearchForm.waiting_for_url)
@@ -179,7 +187,7 @@ async def process_url(msg: Message, state: FSMContext):
         return
 
     await state.update_data(url=url)
-    await msg.answer("💰 Теперь введите <b>максимальную цену</b> в рублях (например: <code>35000</code>):", parse_mode="HTML")
+    await msg.answer("💰 Введите <b>максимальную цену</b> в рублях:", parse_mode="HTML")
     await state.set_state(SearchForm.waiting_for_price)
 
 @dp.message(SearchForm.waiting_for_price)
@@ -198,7 +206,7 @@ async def process_price(msg: Message, state: FSMContext):
     await msg.answer(
         f"✅ <b>Поиск успешно добавлен!</b>\n"
         f"💰 Макс. цена: {max_price:,} ₽\n\n"
-        f"Бот начал отслеживать свежие лоты по вашей ссылке.",
+        f"Бот начал отслеживать свежие лоты.",
         parse_mode="HTML"
     )
 
@@ -236,26 +244,45 @@ async def monitor_task():
         try:
             searches = get_all_searches()
             for s_id, user_id, url, max_price in searches:
-                items = await fetch_ads_via_browser(url)
+                items = await fetch_ads_direct(url)
                 for item in items:
                     item_id = item["id"]
 
                     if not is_item_seen(item_id):
                         mark_item_as_seen(item_id)
 
-                        if item["price"] <= max_price and item["price"] > 0:
-                            text = (
+                        if 0 < item["price"] <= max_price:
+                            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="🔗 Открыть на Авито", url=item['url'])]
+                            ])
+                            
+                            caption_text = (
                                 f"🔥 <b>Новое объявление!</b>\n\n"
-                                f"📌 {item['title']}\n"
-                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n\n"
-                                f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
+                                f"📌 <b>{item['title']}</b>\n"
+                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
                             )
-                            try:
-                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
-                            except Exception as err:
-                                logging.error(f"Ошибка отправки сообщения: {err}")
 
-                await asyncio.sleep(5)  # Небольшая пауза между проверками разных ссылок
+                            try:
+                                if item.get('photo_url') and item['photo_url'].startswith("http"):
+                                    await bot.send_photo(
+                                        chat_id=user_id,
+                                        photo=item['photo_url'],
+                                        caption=caption_text,
+                                        parse_mode="HTML",
+                                        reply_markup=keyboard
+                                    )
+                                else:
+                                    await bot.send_message(
+                                        chat_id=user_id,
+                                        text=caption_text,
+                                        parse_mode="HTML",
+                                        reply_markup=keyboard
+                                    )
+                            except Exception as err:
+                                logging.error(f"Ошибка отправки в Telegram: {err}")
+
+                await asyncio.sleep(4)
+
         except Exception as e:
             logging.error(f"Ошибка в цикле мониторинга: {e}")
 
