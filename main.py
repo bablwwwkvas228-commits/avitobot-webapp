@@ -164,8 +164,6 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 if not item_id:
                     continue
 
-                card_text = card.get_text(separator=" ", strip=True)
-
                 title_elem = card.select_one('[data-marker="item-title"]')
                 title = title_elem.get_text(strip=True) if title_elem else "Без названия"
 
@@ -175,33 +173,29 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 price_meta = card.select_one('meta[itemprop="price"]')
                 price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
 
-                # === УЛУЧШЕННЫЙ ПАРСИНГ ЛОКАЦИИ ===
+                # === ТОЧНЫЙ ПОИСК ЛОКАЦИИ ===
                 location = "Локация не указана"
                 geo_elem = (
                     card.find(attrs={"data-marker": "item-address"}) or 
                     card.select_one('[class*="geo-"]') or 
-                    card.select_one('[class*="address-"]')
+                    card.select_one('[class*="address-"]') or
+                    card.select_one('[class*="location-"]')
                 )
                 if geo_elem:
                     location = geo_elem.get_text(separator=" ", strip=True)
-                    location = re.sub(r'\s+', ' ', location) # Убираем лишние пробелы
+                else:
+                    # Резервный поиск по тексту карточки
+                    for span in card.find_all(['span', 'div']):
+                        txt = span.get_text(strip=True)
+                        if ("," in txt or "район" in txt.lower() or "область" in txt.lower()) and 3 < len(txt) < 40 and "₽" not in txt:
+                            location = txt
+                            break
+
+                location = re.sub(r'\s+', ' ', location).strip()
 
                 date_elem = card.select_one('[data-marker="item-date"]')
                 raw_date = date_elem.get_text(strip=True) if date_elem else ""
                 ad_date = parse_avito_date(raw_date)
-
-                img_elem = card.select_one('img[itemprop="image"]') or card.select_one('[data-marker="item-photo"] img') or card.select_one('img[class*="photo-"]')
-                photo_url = img_elem.get('src') if img_elem else None
-
-                desc_elem = card.select_one('meta[itemprop="description"]')
-                description = desc_elem.get("content", "").strip() if desc_elem else ""
-                if not description:
-                    desc_text = card.select_one('div[class*="item-description"]')
-                    description = desc_text.get_text(separator=" ", strip=True) if desc_text else "Описание не указано"
-
-                description = description.replace('<', '&lt;').replace('>', '&gt;')
-                if len(description) > 300:
-                    description = description[:297] + "..."
 
                 results.append({
                     "id": item_id,
@@ -209,9 +203,7 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                     "price": price,
                     "url": url,
                     "location": location,
-                    "ad_date": ad_date,
-                    "photo_url": photo_url,
-                    "description": description
+                    "ad_date": ad_date
                 })
 
     except Exception as e:
@@ -287,141 +279,3 @@ async def cmd_start(msg: Message):
         reply_markup=main_keyboard,
         parse_mode="HTML"
     )
-
-@dp.message(F.text == "➕ Добавить поиск")
-async def btn_add(msg: Message, state: FSMContext):
-    await msg.answer("🔗 Отправьте <b>ссылку на поиск с Авито</b>:", parse_mode="HTML")
-    await state.set_state(SearchForm.waiting_for_url)
-
-@dp.message(SearchForm.waiting_for_url)
-async def process_url(msg: Message, state: FSMContext):
-    url = msg.text.strip()
-    if not url.startswith("http"):
-        await msg.answer("Пожалуйста, отправьте корректную ссылку, начинающуюся с http:// или https://")
-        return
-
-    await state.update_data(url=url)
-    await msg.answer("💰 Введите <b>максимальную цену</b> в рублях:", parse_mode="HTML")
-    await state.set_state(SearchForm.waiting_for_price)
-
-@dp.message(SearchForm.waiting_for_price)
-async def process_price(msg: Message, state: FSMContext):
-    digits = re.sub(r"\D", "", msg.text)
-    if not digits:
-        await msg.answer("Введите число (только цифры):")
-        return
-
-    max_price = int(digits)
-    data = await state.get_data()
-    url = data["url"]
-
-    add_search(msg.from_user.id, url, max_price)
-    await state.clear()
-    await msg.answer(
-        f"✅ <b>Поиск успешно добавлен!</b>\n"
-        f"💰 Макс. цена: {max_price:,} ₽\n\n"
-        f"Бот отслеживает новые объявления.",
-        parse_mode="HTML"
-    )
-
-@dp.message(F.text == "📋 Мои поиски")
-async def btn_list(msg: Message):
-    searches = get_all_searches()
-    user_searches = [s for s in searches if s[1] == msg.from_user.id]
-
-    if not user_searches:
-        await msg.answer("У вас пока нет активных поисков. Нажмите «➕ Добавить поиск».")
-        return
-
-    for s_id, _, url, max_price in user_searches:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{s_id}")
-        ]])
-        await msg.answer(
-            f"🔍 <b>Поиск #{s_id}</b>\n"
-            f"💰 Лимит: до {max_price:,} ₽\n"
-            f"🔗 <a href='{url}'>Ссылка поиска</a>",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-
-@dp.callback_query(F.data.startswith("del_"))
-async def delete_callback(callback: CallbackQuery):
-    s_id = int(callback.data.split("_")[1])
-    delete_search(s_id)
-    await callback.message.edit_text("❌ Поиск удален.")
-    await callback.answer()
-
-# ================= 6. ФОНОВЫЙ МОНИТОРИНГ =================
-async def monitor_task():
-    while True:
-        try:
-            searches = get_all_searches()
-            for s_id, user_id, url, max_price in searches:
-                items = await fetch_ads_direct(url)
-                
-                if not items:
-                    continue
-
-                for item in items:
-                    item_id = item["id"]
-
-                    if not is_item_seen(item_id):
-                        mark_item_as_seen(item_id)
-
-                        if 0 < item["price"] <= max_price:
-                            avg_price = get_model_average(item["title"], items)
-                            
-                            stats_text = ""
-                            if avg_price > 0:
-                                diff = item["price"] - avg_price
-                                percent = abs(int((diff / avg_price) * 100))
-                                if diff < 0:
-                                    stats_text = f"📉 На {percent}% ниже рынка ({avg_price:,} ₽)"
-                                elif diff > 0:
-                                    stats_text = f"📈 На {percent}% выше рынка ({avg_price:,} ₽)"
-                                else:
-                                    stats_text = f"⚖️ Равна средней цене ({avg_price:,} ₽)"
-                            else:
-                                stats_text = "🤷‍♂️ Нет данных для сравнения точной модели"
-
-                            tz_moscow = timezone(timedelta(hours=3))
-                            current_time = datetime.now(tz_moscow).strftime("%H:%M")
-
-                            safe_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
-                            
-                            # Убрал продавца и отзывы, оставил только то, что просили
-                            text = (
-                                f"<b>{safe_title}</b>\n"
-                                f"💰 {item['price']:,} ₽\n"
-                                f"🌍 {item['location']}\n"
-                                f"📊 {stats_text}\n"
-                                f"🔍 {item['url']}\n\n"
-                                f"<blockquote>{item['description']}</blockquote>\n\n"
-                                f"📅 {item['ad_date']}\n"
-                                f"🕒 Бот нашел: {current_time}"
-                            )
-                            try:
-                                if item['photo_url']:
-                                    await bot.send_photo(chat_id=user_id, photo=item['photo_url'], caption=text, parse_mode="HTML")
-                                else:
-                                    await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
-                            except Exception as err:
-                                logging.error(f"Ошибка отправки сообщения: {err}")
-
-                await asyncio.sleep(4)
-
-        except Exception as e:
-            logging.error(f"Ошибка в цикле мониторинга: {e}")
-
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
-
-# ================= 7. ТОЧКА ВХОДА =================
-async def main():
-    init_db()
-    asyncio.create_task(monitor_task())
-    logging.info("Бот запущен...")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
