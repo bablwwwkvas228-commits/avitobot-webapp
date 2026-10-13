@@ -3,7 +3,7 @@ import logging
 import sqlite3
 import re
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from dotenv import load_dotenv
@@ -17,7 +17,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
-# Загружаем переменные из .env файла (если он есть локально)
+# Загружаем переменные из .env файла
 load_dotenv()
 
 # ================= 1. НАСТРОЙКИ =================
@@ -116,7 +116,6 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
             soup = BeautifulSoup(resp.text, "html.parser")
             cards = soup.select('div[data-marker="item"]')
 
-            # Парсим все объявления на странице (обычно 50 штук) для точного расчета средней цены
             for card in cards:
                 item_id = card.get("data-item-id")
                 if not item_id:
@@ -131,12 +130,19 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 price_meta = card.select_one('meta[itemprop="price"]')
                 price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
 
-                geo_elem = card.select_one('[class*="geo-"]')
-                location = geo_elem.get_text(strip=True) if geo_elem else "Не указано"
+                # Местоположение 
+                geo_elem = card.select_one('[class*="geo-"]') or card.select_one('[data-marker="item-address"]')
+                location = geo_elem.get_text(strip=True) if geo_elem else "Локация не указана"
 
+                # Название профиля / Имя продавца
+                seller_elem = card.select_one('[data-marker="item-seller-info"]') or card.select_one('p[data-marker="item-line"]') or card.select_one('[class*="seller-"]')
+                seller = seller_elem.get_text(strip=True) if seller_elem else "Продавец скрыт"
+
+                # Отзывы
                 rating_elem = card.select_one('[data-marker="item-rating"]')
                 reviews = rating_elem.get_text(strip=True) if rating_elem else "Нет отзывов"
 
+                # Дата публикации
                 date_elem = card.select_one('[data-marker="item-date"]')
                 ad_date = date_elem.get_text(strip=True) if date_elem else "Неизвестно"
 
@@ -146,6 +152,7 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                     "price": price,
                     "url": url,
                     "location": location,
+                    "seller": seller,
                     "reviews": reviews,
                     "ad_date": ad_date
                 })
@@ -157,21 +164,16 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
 
 # ================= 4. АЛГОРИТМ РАСЧЕТА СРЕДНЕЙ ЦЕНЫ МОДЕЛИ =================
 def get_model_average(target_title: str, items: list) -> int:
-    """Вычисляет среднюю цену только среди похожих моделей с такой же памятью."""
     def normalize_title(t):
         t = t.lower()
-        # Отделяем цифры от букв (чтобы "128gb" превратилось в "128 gb")
         t = re.sub(r'(\d+)([a-zа-я]+)', r'\1 \2', t)
         t = re.sub(r'([a-zа-я]+)(\d+)', r'\1 \2', t)
-        # Оставляем только буквы и цифры
         t = re.sub(r'[^\w\s]', ' ', t)
         tokens = set(t.split())
         numbers = set(re.findall(r'\d+', t))
         return tokens, numbers
 
     target_tokens, target_numbers = normalize_title(target_title)
-    
-    # Ключевые модификаторы, которые строго отличают модели
     modifiers = {'pro', 'max', 'plus', 'ultra', 'mini', 'lite', 'fe'}
     target_mods = target_tokens.intersection(modifiers)
 
@@ -182,15 +184,12 @@ def get_model_average(target_title: str, items: list) -> int:
             
         item_tokens, item_numbers = normalize_title(item["title"])
         
-        # 1. Проверяем модификаторы (если ищем Pro Max, то обычный Pro не пройдет)
         if target_mods != item_tokens.intersection(modifiers):
             continue
 
-        # 2. Проверяем цифры (если ищем 15 и 128, то в аналоге тоже должны быть 15 и 128)
         if target_numbers and not target_numbers.issubset(item_numbers):
             continue
 
-        # 3. Если в названии вообще нет цифр, проверяем совпадение текста на 50%
         if not target_numbers and len(target_tokens) > 0:
             ratio = len(target_tokens.intersection(item_tokens)) / len(target_tokens)
             if ratio < 0.5:
@@ -314,7 +313,6 @@ async def monitor_task():
                         mark_item_as_seen(item_id)
 
                         if 0 < item["price"] <= max_price:
-                            # Вычисляем среднюю цену именно для этой модели
                             avg_price = get_model_average(item["title"], items)
                             
                             stats_text = ""
@@ -330,19 +328,22 @@ async def monitor_task():
                             else:
                                 stats_text = "🤷‍♂️ Нет данных для сравнения точной модели"
 
-                            current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+                            # Настраиваем Московское время (UTC+3)
+                            tz_moscow = timezone(timedelta(hours=3))
+                            current_time = datetime.now(tz_moscow).strftime("%d.%m.%Y %H:%M")
 
                             text = (
                                 f"📌 <b>{item['title']}</b>\n"
                                 f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
-                                f"👤 Продавец · {item['reviews']}\n"
-                                f"🌍 Местоположение: {item['location']}\n"
+                                f"👤 {item['seller']} · {item['reviews']}\n"
+                                f"🌍 {item['location']}\n"
                                 f"📊 {stats_text}\n\n"
                                 f"🔗 {item['url']}\n"
                                 f"🕒 {item['ad_date']} (Найдено: {current_time})"
                             )
                             try:
-                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
+                                # Убрано disable_web_page_preview=True, теперь картинка будет грузиться
+                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
                             except Exception as err:
                                 logging.error(f"Ошибка отправки сообщения: {err}")
 
