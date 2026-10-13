@@ -130,19 +130,37 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 price_meta = card.select_one('meta[itemprop="price"]')
                 price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
 
-                # Местоположение 
                 geo_elem = card.select_one('[class*="geo-"]') or card.select_one('[data-marker="item-address"]')
                 location = geo_elem.get_text(strip=True) if geo_elem else "Локация не указана"
 
                 # Название профиля / Имя продавца
-                seller_elem = card.select_one('[data-marker="item-seller-info"]') or card.select_one('p[data-marker="item-line"]') or card.select_one('[class*="seller-"]')
-                seller = seller_elem.get_text(strip=True) if seller_elem else "Продавец скрыт"
+                seller = "Имя скрыто"
+                seller_elem = card.select_one('[data-marker="item-seller-info"]') or card.find('p', {'data-marker': 'item-line'})
+                if seller_elem:
+                    seller_text = seller_elem.get_text(separator=" ", strip=True)
+                    # Отрезаем мусор, если парсер захватил слишком много
+                    seller = seller_text[:40] + "..." if len(seller_text) > 40 else seller_text
 
-                # Отзывы
-                rating_elem = card.select_one('[data-marker="item-rating"]')
-                reviews = rating_elem.get_text(strip=True) if rating_elem else "Нет отзывов"
+                # Умный поиск отзывов (Резервный метод, если маркеры сменились)
+                reviews = "Нет отзывов"
+                rating_elem = card.select_one('[data-marker="item-rating"]') or card.select_one('[data-marker="seller-rating"]')
+                
+                if rating_elem:
+                    reviews = rating_elem.get_text(separator=" ", strip=True)
+                else:
+                    # Ищем слово "отзыв" по всему тексту карточки
+                    review_node = card.find(string=re.compile(r'отзыв', re.IGNORECASE))
+                    if review_node:
+                        # Берем родительский контейнер, чтобы захватить и саму оценку ("4,9")
+                        parent_div = review_node.find_parent('div')
+                        if parent_div and len(parent_div.get_text(strip=True)) < 30:
+                            reviews = parent_div.get_text(separator=" ", strip=True)
+                        elif review_node.parent:
+                            reviews = review_node.parent.get_text(separator=" ", strip=True)
+                            
+                # Убираем лишние пробелы в отзывах
+                reviews = re.sub(r'\s+', ' ', reviews).strip()
 
-                # Дата публикации
                 date_elem = card.select_one('[data-marker="item-date"]')
                 ad_date = date_elem.get_text(strip=True) if date_elem else "Неизвестно"
 
@@ -328,7 +346,6 @@ async def monitor_task():
                             else:
                                 stats_text = "🤷‍♂️ Нет данных для сравнения точной модели"
 
-                            # Настраиваем Московское время (UTC+3)
                             tz_moscow = timezone(timedelta(hours=3))
                             current_time = datetime.now(tz_moscow).strftime("%d.%m.%Y %H:%M")
 
@@ -342,7 +359,6 @@ async def monitor_task():
                                 f"🕒 {item['ad_date']} (Найдено: {current_time})"
                             )
                             try:
-                                # Убрано disable_web_page_preview=True, теперь картинка будет грузиться
                                 await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
                             except Exception as err:
                                 logging.error(f"Ошибка отправки сообщения: {err}")
