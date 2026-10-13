@@ -91,6 +91,55 @@ def format_avito_url(url: str) -> str:
     new_query = urlencode(query, doseq=True)
     return urlunparse(parsed._replace(query=new_query))
 
+# Функция для конвертации расплывчатого времени Авито в точное время
+def parse_avito_date(date_str: str) -> str:
+    if not date_str:
+        return "Неизвестно"
+        
+    tz_moscow = timezone(timedelta(hours=3))
+    now = datetime.now(tz_moscow)
+    date_str = date_str.lower().strip()
+
+    try:
+        if "только что" in date_str:
+            return now.strftime("%d.%m.%Y %H:%M")
+
+        # Проверка на "X минут назад"
+        match_min = re.search(r'(\d+)\s*минут', date_str)
+        if match_min:
+            dt = now - timedelta(minutes=int(match_min.group(1)))
+            return dt.strftime("%d.%m.%Y %H:%M")
+        if "минуту назад" in date_str:
+            dt = now - timedelta(minutes=1)
+            return dt.strftime("%d.%m.%Y %H:%M")
+
+        # Проверка на "X час(ов) назад"
+        match_hour = re.search(r'(\d+)\s*час', date_str)
+        if match_hour:
+            dt = now - timedelta(hours=int(match_hour.group(1)))
+            return dt.strftime("%d.%m.%Y %H:%M")
+        if "час назад" in date_str:
+            dt = now - timedelta(hours=1)
+            return dt.strftime("%d.%m.%Y %H:%M")
+
+        # Проверка на "сегодня в HH:MM"
+        match_today = re.search(r'сегодня\s*(?:в)?\s*(\d{1,2}):(\d{2})', date_str)
+        if match_today:
+            dt = now.replace(hour=int(match_today.group(1)), minute=int(match_today.group(2)))
+            return dt.strftime("%d.%m.%Y %H:%M")
+
+        # Проверка на "вчера в HH:MM"
+        match_yesterday = re.search(r'вчера\s*(?:в)?\s*(\d{1,2}):(\d{2})', date_str)
+        if match_yesterday:
+            dt = (now - timedelta(days=1)).replace(hour=int(match_yesterday.group(1)), minute=int(match_yesterday.group(2)))
+            return dt.strftime("%d.%m.%Y %H:%M")
+
+        # Если формат "12 октября 15:30" (возвращаем как есть с заглавной буквы)
+        return date_str.capitalize()
+    except Exception as e:
+        logging.warning(f"Не удалось распарсить дату: {date_str} - {e}")
+        return date_str.capitalize()
+
 async def fetch_ads_direct(search_url: str) -> list[dict]:
     target_url = format_avito_url(search_url)
     results = []
@@ -121,6 +170,9 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 if not item_id:
                     continue
 
+                # Весь текст карточки без HTML тегов (поможет для поиска отзывов)
+                card_text = card.get_text(separator=" ", strip=True)
+
                 title_elem = card.select_one('[data-marker="item-title"]')
                 title = title_elem.get_text(strip=True) if title_elem else "Без названия"
 
@@ -133,36 +185,35 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 geo_elem = card.select_one('[class*="geo-"]') or card.select_one('[data-marker="item-address"]')
                 location = geo_elem.get_text(strip=True) if geo_elem else "Локация не указана"
 
-                # Название профиля / Имя продавца
-                seller = "Имя скрыто"
-                seller_elem = card.select_one('[data-marker="item-seller-info"]') or card.find('p', {'data-marker': 'item-line'})
-                if seller_elem:
-                    seller_text = seller_elem.get_text(separator=" ", strip=True)
-                    # Отрезаем мусор, если парсер захватил слишком много
-                    seller = seller_text[:40] + "..." if len(seller_text) > 40 else seller_text
-
-                # Умный поиск отзывов (Резервный метод, если маркеры сменились)
-                reviews = "Нет отзывов"
-                rating_elem = card.select_one('[data-marker="item-rating"]') or card.select_one('[data-marker="seller-rating"]')
-                
-                if rating_elem:
-                    reviews = rating_elem.get_text(separator=" ", strip=True)
+                # === УМНЫЙ ПАРСИНГ ИМЕНИ ПРОДАВЦА ===
+                seller = "Не указано"
+                # Ищем ссылку на профиль пользователя или магазина
+                seller_link = card.select_one('a[href*="/user/"], a[href*="/brands/"]')
+                if seller_link:
+                    seller = seller_link.get_text(strip=True)
                 else:
-                    # Ищем слово "отзыв" по всему тексту карточки
-                    review_node = card.find(string=re.compile(r'отзыв', re.IGNORECASE))
-                    if review_node:
-                        # Берем родительский контейнер, чтобы захватить и саму оценку ("4,9")
-                        parent_div = review_node.find_parent('div')
-                        if parent_div and len(parent_div.get_text(strip=True)) < 30:
-                            reviews = parent_div.get_text(separator=" ", strip=True)
-                        elif review_node.parent:
-                            reviews = review_node.parent.get_text(separator=" ", strip=True)
-                            
-                # Убираем лишние пробелы в отзывах
-                reviews = re.sub(r'\s+', ' ', reviews).strip()
+                    # Резервный вариант, если это частное лицо без имени
+                    if "Частное лицо" in card_text:
+                        seller = "Частное лицо"
+                    elif "Компания" in card_text:
+                        seller = "Компания"
 
+                # === УМНЫЙ ПАРСИНГ ОТЗЫВОВ ===
+                reviews = "Нет отзывов"
+                # Ищем в тексте любую комбинацию вроде "4,9 15 отзывов", "5.0 1 отзыв" или просто "25 отзывов"
+                rev_match = re.search(r'(?:(\d[.,]\d)\s*)?(\d+)\s*отзыв[аов]*', card_text, re.IGNORECASE)
+                if rev_match:
+                    rating = rev_match.group(1)
+                    count = rev_match.group(2)
+                    if rating:
+                        reviews = f"⭐ {rating} ({count} отзывов)"
+                    else:
+                        reviews = f"({count} отзывов)"
+
+                # === УМНЫЙ ПАРСИНГ ДАТЫ ===
                 date_elem = card.select_one('[data-marker="item-date"]')
-                ad_date = date_elem.get_text(strip=True) if date_elem else "Неизвестно"
+                raw_date = date_elem.get_text(strip=True) if date_elem else ""
+                ad_date = parse_avito_date(raw_date)
 
                 results.append({
                     "id": item_id,
@@ -352,11 +403,11 @@ async def monitor_task():
                             text = (
                                 f"📌 <b>{item['title']}</b>\n"
                                 f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
-                                f"👤 {item['seller']} · {item['reviews']}\n"
+                                f"👤 Продавец: {item['seller']} · {item['reviews']}\n"
                                 f"🌍 {item['location']}\n"
                                 f"📊 {stats_text}\n\n"
-                                f"🔗 {item['url']}\n"
-                                f"🕒 {item['ad_date']} (Найдено: {current_time})"
+                                f"🔗 {item['url']}\n\n"
+                                f"🕒 Опубликовано: {item['ad_date']} (Бот нашел: {current_time})"
                             )
                             try:
                                 await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
