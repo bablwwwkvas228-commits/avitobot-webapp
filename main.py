@@ -175,45 +175,30 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 price_meta = card.select_one('meta[itemprop="price"]')
                 price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
 
-                geo_elem = card.select_one('[class*="geo-"]') or card.select_one('[data-marker="item-address"]')
-                location = geo_elem.get_text(strip=True) if geo_elem else "Локация не указана"
-
-                seller = "Не указано"
-                seller_link = card.select_one('a[href*="/user/"], a[href*="/brands/"]')
-                if seller_link:
-                    seller = seller_link.get_text(strip=True)
-                else:
-                    if "Частное лицо" in card_text:
-                        seller = "Частное лицо"
-                    elif "Компания" in card_text:
-                        seller = "Компания"
-
-                reviews = "Нет отзывов"
-                rev_match = re.search(r'(?:(\d[.,]\d)\s*)?(\d+)\s*отзыв[аов]*', card_text, re.IGNORECASE)
-                if rev_match:
-                    rating = rev_match.group(1)
-                    count = rev_match.group(2)
-                    if rating:
-                        reviews = f"⭐ {rating} ({count} отзывов)"
-                    else:
-                        reviews = f"({count} отзывов)"
+                # === УЛУЧШЕННЫЙ ПАРСИНГ ЛОКАЦИИ ===
+                location = "Локация не указана"
+                geo_elem = (
+                    card.find(attrs={"data-marker": "item-address"}) or 
+                    card.select_one('[class*="geo-"]') or 
+                    card.select_one('[class*="address-"]')
+                )
+                if geo_elem:
+                    location = geo_elem.get_text(separator=" ", strip=True)
+                    location = re.sub(r'\s+', ' ', location) # Убираем лишние пробелы
 
                 date_elem = card.select_one('[data-marker="item-date"]')
                 raw_date = date_elem.get_text(strip=True) if date_elem else ""
                 ad_date = parse_avito_date(raw_date)
 
-                # === ПАРСИНГ ФОТОГРАФИИ ===
                 img_elem = card.select_one('img[itemprop="image"]') or card.select_one('[data-marker="item-photo"] img') or card.select_one('img[class*="photo-"]')
                 photo_url = img_elem.get('src') if img_elem else None
 
-                # === ПАРСИНГ ОПИСАНИЯ ===
                 desc_elem = card.select_one('meta[itemprop="description"]')
                 description = desc_elem.get("content", "").strip() if desc_elem else ""
                 if not description:
                     desc_text = card.select_one('div[class*="item-description"]')
                     description = desc_text.get_text(separator=" ", strip=True) if desc_text else "Описание не указано"
 
-                # Защита от слишком длинного текста (Telegram обрезает подписи к фото больше 1024 символов)
                 description = description.replace('<', '&lt;').replace('>', '&gt;')
                 if len(description) > 300:
                     description = description[:297] + "..."
@@ -224,8 +209,6 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                     "price": price,
                     "url": url,
                     "location": location,
-                    "seller": seller,
-                    "reviews": reviews,
                     "ad_date": ad_date,
                     "photo_url": photo_url,
                     "description": description
@@ -407,11 +390,10 @@ async def monitor_task():
 
                             safe_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
                             
-                            # Формируем текст с блоком цитаты как на скриншоте
+                            # Убрал продавца и отзывы, оставил только то, что просили
                             text = (
                                 f"<b>{safe_title}</b>\n"
                                 f"💰 {item['price']:,} ₽\n"
-                                f"👤 {item['seller']} · {item['reviews']}\n"
                                 f"🌍 {item['location']}\n"
                                 f"📊 {stats_text}\n"
                                 f"🔍 {item['url']}\n\n"
@@ -420,7 +402,6 @@ async def monitor_task():
                                 f"🕒 Бот нашел: {current_time}"
                             )
                             try:
-                                # Если есть фото, отправляем как картинку с подписью, иначе как обычный текст
                                 if item['photo_url']:
                                     await bot.send_photo(chat_id=user_id, photo=item['photo_url'], caption=text, parse_mode="HTML")
                                 else:
