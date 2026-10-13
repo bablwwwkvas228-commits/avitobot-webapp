@@ -91,7 +91,6 @@ def format_avito_url(url: str) -> str:
     new_query = urlencode(query, doseq=True)
     return urlunparse(parsed._replace(query=new_query))
 
-# Функция для конвертации расплывчатого времени Авито в точное время
 def parse_avito_date(date_str: str) -> str:
     if not date_str:
         return "Неизвестно"
@@ -104,7 +103,6 @@ def parse_avito_date(date_str: str) -> str:
         if "только что" in date_str:
             return now.strftime("%d.%m.%Y %H:%M")
 
-        # Проверка на "X минут назад"
         match_min = re.search(r'(\d+)\s*минут', date_str)
         if match_min:
             dt = now - timedelta(minutes=int(match_min.group(1)))
@@ -113,7 +111,6 @@ def parse_avito_date(date_str: str) -> str:
             dt = now - timedelta(minutes=1)
             return dt.strftime("%d.%m.%Y %H:%M")
 
-        # Проверка на "X час(ов) назад"
         match_hour = re.search(r'(\d+)\s*час', date_str)
         if match_hour:
             dt = now - timedelta(hours=int(match_hour.group(1)))
@@ -122,19 +119,16 @@ def parse_avito_date(date_str: str) -> str:
             dt = now - timedelta(hours=1)
             return dt.strftime("%d.%m.%Y %H:%M")
 
-        # Проверка на "сегодня в HH:MM"
         match_today = re.search(r'сегодня\s*(?:в)?\s*(\d{1,2}):(\d{2})', date_str)
         if match_today:
             dt = now.replace(hour=int(match_today.group(1)), minute=int(match_today.group(2)))
             return dt.strftime("%d.%m.%Y %H:%M")
 
-        # Проверка на "вчера в HH:MM"
         match_yesterday = re.search(r'вчера\s*(?:в)?\s*(\d{1,2}):(\d{2})', date_str)
         if match_yesterday:
             dt = (now - timedelta(days=1)).replace(hour=int(match_yesterday.group(1)), minute=int(match_yesterday.group(2)))
             return dt.strftime("%d.%m.%Y %H:%M")
 
-        # Если формат "12 октября 15:30" (возвращаем как есть с заглавной буквы)
         return date_str.capitalize()
     except Exception as e:
         logging.warning(f"Не удалось распарсить дату: {date_str} - {e}")
@@ -170,7 +164,6 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 if not item_id:
                     continue
 
-                # Весь текст карточки без HTML тегов (поможет для поиска отзывов)
                 card_text = card.get_text(separator=" ", strip=True)
 
                 title_elem = card.select_one('[data-marker="item-title"]')
@@ -185,22 +178,17 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 geo_elem = card.select_one('[class*="geo-"]') or card.select_one('[data-marker="item-address"]')
                 location = geo_elem.get_text(strip=True) if geo_elem else "Локация не указана"
 
-                # === УМНЫЙ ПАРСИНГ ИМЕНИ ПРОДАВЦА ===
                 seller = "Не указано"
-                # Ищем ссылку на профиль пользователя или магазина
                 seller_link = card.select_one('a[href*="/user/"], a[href*="/brands/"]')
                 if seller_link:
                     seller = seller_link.get_text(strip=True)
                 else:
-                    # Резервный вариант, если это частное лицо без имени
                     if "Частное лицо" in card_text:
                         seller = "Частное лицо"
                     elif "Компания" in card_text:
                         seller = "Компания"
 
-                # === УМНЫЙ ПАРСИНГ ОТЗЫВОВ ===
                 reviews = "Нет отзывов"
-                # Ищем в тексте любую комбинацию вроде "4,9 15 отзывов", "5.0 1 отзыв" или просто "25 отзывов"
                 rev_match = re.search(r'(?:(\d[.,]\d)\s*)?(\d+)\s*отзыв[аов]*', card_text, re.IGNORECASE)
                 if rev_match:
                     rating = rev_match.group(1)
@@ -210,10 +198,25 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                     else:
                         reviews = f"({count} отзывов)"
 
-                # === УМНЫЙ ПАРСИНГ ДАТЫ ===
                 date_elem = card.select_one('[data-marker="item-date"]')
                 raw_date = date_elem.get_text(strip=True) if date_elem else ""
                 ad_date = parse_avito_date(raw_date)
+
+                # === ПАРСИНГ ФОТОГРАФИИ ===
+                img_elem = card.select_one('img[itemprop="image"]') or card.select_one('[data-marker="item-photo"] img') or card.select_one('img[class*="photo-"]')
+                photo_url = img_elem.get('src') if img_elem else None
+
+                # === ПАРСИНГ ОПИСАНИЯ ===
+                desc_elem = card.select_one('meta[itemprop="description"]')
+                description = desc_elem.get("content", "").strip() if desc_elem else ""
+                if not description:
+                    desc_text = card.select_one('div[class*="item-description"]')
+                    description = desc_text.get_text(separator=" ", strip=True) if desc_text else "Описание не указано"
+
+                # Защита от слишком длинного текста (Telegram обрезает подписи к фото больше 1024 символов)
+                description = description.replace('<', '&lt;').replace('>', '&gt;')
+                if len(description) > 300:
+                    description = description[:297] + "..."
 
                 results.append({
                     "id": item_id,
@@ -223,7 +226,9 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                     "location": location,
                     "seller": seller,
                     "reviews": reviews,
-                    "ad_date": ad_date
+                    "ad_date": ad_date,
+                    "photo_url": photo_url,
+                    "description": description
                 })
 
     except Exception as e:
@@ -398,19 +403,28 @@ async def monitor_task():
                                 stats_text = "🤷‍♂️ Нет данных для сравнения точной модели"
 
                             tz_moscow = timezone(timedelta(hours=3))
-                            current_time = datetime.now(tz_moscow).strftime("%d.%m.%Y %H:%M")
+                            current_time = datetime.now(tz_moscow).strftime("%H:%M")
 
+                            safe_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
+                            
+                            # Формируем текст с блоком цитаты как на скриншоте
                             text = (
-                                f"📌 <b>{item['title']}</b>\n"
-                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
-                                f"👤 Продавец: {item['seller']} · {item['reviews']}\n"
+                                f"<b>{safe_title}</b>\n"
+                                f"💰 {item['price']:,} ₽\n"
+                                f"👤 {item['seller']} · {item['reviews']}\n"
                                 f"🌍 {item['location']}\n"
-                                f"📊 {stats_text}\n\n"
-                                f"🔗 {item['url']}\n\n"
-                                f"🕒 Опубликовано: {item['ad_date']} (Бот нашел: {current_time})"
+                                f"📊 {stats_text}\n"
+                                f"🔍 {item['url']}\n\n"
+                                f"<blockquote>{item['description']}</blockquote>\n\n"
+                                f"📅 {item['ad_date']}\n"
+                                f"🕒 Бот нашел: {current_time}"
                             )
                             try:
-                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                                # Если есть фото, отправляем как картинку с подписью, иначе как обычный текст
+                                if item['photo_url']:
+                                    await bot.send_photo(chat_id=user_id, photo=item['photo_url'], caption=text, parse_mode="HTML")
+                                else:
+                                    await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
                             except Exception as err:
                                 logging.error(f"Ошибка отправки сообщения: {err}")
 
