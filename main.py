@@ -2,11 +2,9 @@ import asyncio
 import logging
 import sqlite3
 import re
-import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -17,11 +15,8 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
-# Загружаем переменные из .env файла
-load_dotenv()
-
 # ================= 1. НАСТРОЙКИ =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = "8735276903:AAH-0nm_PSEaMHZ3Bqk76rAKDZArYlpLfoc"
 CHECK_INTERVAL_SECONDS = 40  # Пауза между проверками
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -173,7 +168,6 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 price_meta = card.select_one('meta[itemprop="price"]')
                 price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
 
-                # === ТОЧНЫЙ ПОИСК ЛОКАЦИИ ===
                 location = "Локация не указана"
                 geo_elem = (
                     card.find(attrs={"data-marker": "item-address"}) or 
@@ -184,7 +178,6 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                 if geo_elem:
                     location = geo_elem.get_text(separator=" ", strip=True)
                 else:
-                    # Резервный поиск по тексту карточки
                     for span in card.find_all(['span', 'div']):
                         txt = span.get_text(strip=True)
                         if ("," in txt or "район" in txt.lower() or "область" in txt.lower()) and 3 < len(txt) < 40 and "₽" not in txt:
@@ -256,9 +249,6 @@ class SearchForm(StatesGroup):
     waiting_for_url = State()
     waiting_for_price = State()
 
-if not BOT_TOKEN:
-    raise ValueError("ОШИБКА: Токен бота не найден! Проверьте файл .env или настройки хостинга.")
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -279,3 +269,135 @@ async def cmd_start(msg: Message):
         reply_markup=main_keyboard,
         parse_mode="HTML"
     )
+
+@dp.message(F.text == "➕ Добавить поиск")
+async def btn_add(msg: Message, state: FSMContext):
+    await msg.answer("🔗 Отправьте <b>ссылку на поиск с Авито</b>:", parse_mode="HTML")
+    await state.set_state(SearchForm.waiting_for_url)
+
+@dp.message(SearchForm.waiting_for_url)
+async def process_url(msg: Message, state: FSMContext):
+    url = msg.text.strip()
+    if not url.startswith("http"):
+        await msg.answer("Пожалуйста, отправьте корректную ссылку, начинающуюся с http:// или https://")
+        return
+
+    await state.update_data(url=url)
+    await msg.answer("💰 Введите <b>максимальную цену</b> в рублях:", parse_mode="HTML")
+    await state.set_state(SearchForm.waiting_for_price)
+
+@dp.message(SearchForm.waiting_for_price)
+async def process_price(msg: Message, state: FSMContext):
+    digits = re.sub(r"\D", "", msg.text)
+    if not digits:
+        await msg.answer("Введите число (только цифры):")
+        return
+
+    max_price = int(digits)
+    data = await state.get_data()
+    url = data["url"]
+
+    add_search(msg.from_user.id, url, max_price)
+    await state.clear()
+    await msg.answer(
+        f"✅ <b>Поиск успешно добавлен!</b>\n"
+        f"💰 Макс. цена: {max_price:,} ₽\n\n"
+        f"Бот отслеживает новые объявления.",
+        reply_markup=main_keyboard
+    )
+
+@dp.message(F.text == "📋 Мои поиски")
+async def btn_list(msg: Message):
+    searches = get_all_searches()
+    user_searches = [s for s in searches if s[1] == msg.from_user.id]
+
+    if not user_searches:
+        await msg.answer("У вас пока нет активных поисков. Нажмите «➕ Добавить поиск».")
+        return
+
+    for s_id, _, url, max_price in user_searches:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{s_id}")
+        ]])
+        await msg.answer(
+            f"🔍 <b>Поиск #{s_id}</b>\n"
+            f"💰 Лимит: до {max_price:,} ₽\n"
+            f"🔗 <a href='{url}'>Ссылка поиска</a>",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+
+@dp.callback_query(F.data.startswith("del_"))
+async def delete_callback(callback: CallbackQuery):
+    s_id = int(callback.data.split("_")[1])
+    delete_search(s_id)
+    await callback.message.edit_text("❌ Поиск удален.")
+    await callback.answer()
+
+# ================= 6. ФОНОВЫЙ МОНИТОРИНГ =================
+async def monitor_task():
+    while True:
+        try:
+            searches = get_all_searches()
+            for s_id, user_id, url, max_price in searches:
+                items = await fetch_ads_direct(url)
+                
+                if not items:
+                    continue
+
+                for item in items:
+                    item_id = item["id"]
+
+                    if not is_item_seen(item_id):
+                        mark_item_as_seen(item_id)
+
+                        if 0 < item["price"] <= max_price:
+                            avg_price = get_model_average(item["title"], items)
+                            
+                            stats_text = ""
+                            if avg_price > 0:
+                                diff = item["price"] - avg_price
+                                percent = abs(int((diff / avg_price) * 100))
+                                if diff < 0:
+                                    stats_text = f"📉 На {percent}% ниже рынка ({avg_price:,} ₽)"
+                                elif diff > 0:
+                                    stats_text = f"📈 На {percent}% выше рынка ({avg_price:,} ₽)"
+                                else:
+                                    stats_text = f"⚖️ Равна средней цене ({avg_price:,} ₽)"
+                            else:
+                                stats_text = "🤷‍♂️ Нет данных для сравнения точной модели"
+
+                            tz_moscow = timezone(timedelta(hours=3))
+                            current_time = datetime.now(tz_moscow).strftime("%H:%M")
+
+                            safe_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
+                            
+                            text = (
+                                f"📌 <b>{safe_title}</b>\n"
+                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
+                                f"🌍 {item['location']}\n"
+                                f"📊 {stats_text}\n\n"
+                                f"🔗 {item['url']}\n\n"
+                                f"🕒 Опубликовано: {item['ad_date']} (Бот нашел: {current_time})"
+                            )
+                            try:
+                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                            except Exception as err:
+                                logging.error(f"Ошибка отправки сообщения: {err}")
+
+                await asyncio.sleep(4)
+
+        except Exception as e:
+            logging.error(f"Ошибка в цикле мониторинга: {e}")
+
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+# ================= 7. ТОЧКА ВХОДА =================
+async def main():
+    init_db()
+    asyncio.create_task(monitor_task())
+    logging.info("Бот запущен...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
