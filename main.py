@@ -2,9 +2,11 @@ import asyncio
 import logging
 import sqlite3
 import re
+import os
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
+from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -15,8 +17,11 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
+# Загружаем переменные из .env файла (если он есть локально)
+load_dotenv()
+
 # ================= 1. НАСТРОЙКИ =================
-BOT_TOKEN = "8735276903:AAH-0nm_PSEaMHZ3Bqk76rAKDZArYlpLfoc"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHECK_INTERVAL_SECONDS = 40  # Пауза между проверками
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -203,6 +208,9 @@ class SearchForm(StatesGroup):
     waiting_for_url = State()
     waiting_for_price = State()
 
+if not BOT_TOKEN:
+    raise ValueError("ОШИБКА: Токен бота не найден! Проверьте файл .env или настройки хостинга.")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -354,4 +362,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
