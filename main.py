@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sqlite3
 import re
+from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from aiogram import Bot, Dispatcher, F
@@ -9,7 +10,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
@@ -77,9 +78,8 @@ def mark_item_as_seen(item_id: str):
     conn.commit()
     conn.close()
 
-# ================= 3. ПАРСИНГ БЕЗ ФОТО =================
+# ================= 3. ПАРСИНГ =================
 def format_avito_url(url: str) -> str:
-    """Гарантирует сортировку по дате (s=104)."""
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
     query['s'] = ['104']
@@ -111,33 +111,38 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
             soup = BeautifulSoup(resp.text, "html.parser")
             cards = soup.select('div[data-marker="item"]')
 
-            for card in cards[:10]:
+            # Парсим все объявления на странице (обычно 50 штук) для точного расчета средней цены
+            for card in cards:
                 item_id = card.get("data-item-id")
                 if not item_id:
                     continue
 
-                # Название
-                title_elem = (
-                    card.select_one('h3[itemprop="name"]') or
-                    card.select_one('a[data-marker="item-title"] h3') or
-                    card.select_one('h3')
-                )
+                title_elem = card.select_one('[data-marker="item-title"]')
                 title = title_elem.get_text(strip=True) if title_elem else "Без названия"
 
-                # Ссылка
-                link_elem = card.select_one('a[data-marker="item-title"]')
-                raw_href = link_elem.get("href") if link_elem else ""
+                raw_href = title_elem.get("href") if title_elem else ""
                 url = f"https://www.avito.ru{raw_href}" if raw_href.startswith("/") else raw_href
 
-                # Цена
                 price_meta = card.select_one('meta[itemprop="price"]')
                 price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
+
+                geo_elem = card.select_one('[class*="geo-"]')
+                location = geo_elem.get_text(strip=True) if geo_elem else "Не указано"
+
+                rating_elem = card.select_one('[data-marker="item-rating"]')
+                reviews = rating_elem.get_text(strip=True) if rating_elem else "Нет отзывов"
+
+                date_elem = card.select_one('[data-marker="item-date"]')
+                ad_date = date_elem.get_text(strip=True) if date_elem else "Неизвестно"
 
                 results.append({
                     "id": item_id,
                     "title": title,
                     "price": price,
-                    "url": url
+                    "url": url,
+                    "location": location,
+                    "reviews": reviews,
+                    "ad_date": ad_date
                 })
 
     except Exception as e:
@@ -145,7 +150,55 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
 
     return results
 
-# ================= 4. TELEGRAM БОТ =================
+# ================= 4. АЛГОРИТМ РАСЧЕТА СРЕДНЕЙ ЦЕНЫ МОДЕЛИ =================
+def get_model_average(target_title: str, items: list) -> int:
+    """Вычисляет среднюю цену только среди похожих моделей с такой же памятью."""
+    def normalize_title(t):
+        t = t.lower()
+        # Отделяем цифры от букв (чтобы "128gb" превратилось в "128 gb")
+        t = re.sub(r'(\d+)([a-zа-я]+)', r'\1 \2', t)
+        t = re.sub(r'([a-zа-я]+)(\d+)', r'\1 \2', t)
+        # Оставляем только буквы и цифры
+        t = re.sub(r'[^\w\s]', ' ', t)
+        tokens = set(t.split())
+        numbers = set(re.findall(r'\d+', t))
+        return tokens, numbers
+
+    target_tokens, target_numbers = normalize_title(target_title)
+    
+    # Ключевые модификаторы, которые строго отличают модели
+    modifiers = {'pro', 'max', 'plus', 'ultra', 'mini', 'lite', 'fe'}
+    target_mods = target_tokens.intersection(modifiers)
+
+    similar_prices = []
+    for item in items:
+        if item["price"] <= 0:
+            continue
+            
+        item_tokens, item_numbers = normalize_title(item["title"])
+        
+        # 1. Проверяем модификаторы (если ищем Pro Max, то обычный Pro не пройдет)
+        if target_mods != item_tokens.intersection(modifiers):
+            continue
+
+        # 2. Проверяем цифры (если ищем 15 и 128, то в аналоге тоже должны быть 15 и 128)
+        if target_numbers and not target_numbers.issubset(item_numbers):
+            continue
+
+        # 3. Если в названии вообще нет цифр, проверяем совпадение текста на 50%
+        if not target_numbers and len(target_tokens) > 0:
+            ratio = len(target_tokens.intersection(item_tokens)) / len(target_tokens)
+            if ratio < 0.5:
+                continue
+
+        similar_prices.append(item["price"])
+
+    if not similar_prices:
+        return 0
+    
+    return sum(similar_prices) // len(similar_prices)
+
+# ================= 5. TELEGRAM БОТ (Интерфейс) =================
 class SearchForm(StatesGroup):
     waiting_for_url = State()
     waiting_for_price = State()
@@ -153,18 +206,26 @@ class SearchForm(StatesGroup):
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="➕ Добавить поиск")],
+        [KeyboardButton(text="📋 Мои поиски")]
+    ],
+    resize_keyboard=True,
+    input_field_placeholder="Выберите действие..."
+)
+
 @dp.message(CommandStart())
 async def cmd_start(msg: Message):
     await msg.answer(
         "👋 <b>Бот поиска свежих объявлений на Авито</b>\n\n"
-        "Команды:\n"
-        "➕ /add — добавить ссылку на поиск с фильтрами\n"
-        "📋 /list — список активных поисков",
+        "Выберите действие на клавиатуре ниже:",
+        reply_markup=main_keyboard,
         parse_mode="HTML"
     )
 
-@dp.message(Command("add"))
-async def cmd_add(msg: Message, state: FSMContext):
+@dp.message(F.text == "➕ Добавить поиск")
+async def btn_add(msg: Message, state: FSMContext):
     await msg.answer("🔗 Отправьте <b>ссылку на поиск с Авито</b>:", parse_mode="HTML")
     await state.set_state(SearchForm.waiting_for_url)
 
@@ -199,13 +260,13 @@ async def process_price(msg: Message, state: FSMContext):
         parse_mode="HTML"
     )
 
-@dp.message(Command("list"))
-async def cmd_list(msg: Message):
+@dp.message(F.text == "📋 Мои поиски")
+async def btn_list(msg: Message):
     searches = get_all_searches()
     user_searches = [s for s in searches if s[1] == msg.from_user.id]
 
     if not user_searches:
-        await msg.answer("У вас пока нет активных поисков. Добавьте через /add.")
+        await msg.answer("У вас пока нет активных поисков. Нажмите «➕ Добавить поиск».")
         return
 
     for s_id, _, url, max_price in user_searches:
@@ -227,13 +288,17 @@ async def delete_callback(callback: CallbackQuery):
     await callback.message.edit_text("❌ Поиск удален.")
     await callback.answer()
 
-# ================= 5. ФОНОВЫЙ МОНИТОРИНГ =================
+# ================= 6. ФОНОВЫЙ МОНИТОРИНГ =================
 async def monitor_task():
     while True:
         try:
             searches = get_all_searches()
             for s_id, user_id, url, max_price in searches:
                 items = await fetch_ads_direct(url)
+                
+                if not items:
+                    continue
+
                 for item in items:
                     item_id = item["id"]
 
@@ -241,14 +306,35 @@ async def monitor_task():
                         mark_item_as_seen(item_id)
 
                         if 0 < item["price"] <= max_price:
+                            # Вычисляем среднюю цену именно для этой модели
+                            avg_price = get_model_average(item["title"], items)
+                            
+                            stats_text = ""
+                            if avg_price > 0:
+                                diff = item["price"] - avg_price
+                                percent = abs(int((diff / avg_price) * 100))
+                                if diff < 0:
+                                    stats_text = f"📉 На {percent}% ниже рынка ({avg_price:,} ₽)"
+                                elif diff > 0:
+                                    stats_text = f"📈 На {percent}% выше рынка ({avg_price:,} ₽)"
+                                else:
+                                    stats_text = f"⚖️ Равна средней цене ({avg_price:,} ₽)"
+                            else:
+                                stats_text = "🤷‍♂️ Нет данных для сравнения точной модели"
+
+                            current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+
                             text = (
-                                f"🔥 <b>Новое объявление!</b>\n\n"
-                                f"📌 {item['title']}\n"
-                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n\n"
-                                f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
+                                f"📌 <b>{item['title']}</b>\n"
+                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
+                                f"👤 Продавец · {item['reviews']}\n"
+                                f"🌍 Местоположение: {item['location']}\n"
+                                f"📊 {stats_text}\n\n"
+                                f"🔗 {item['url']}\n"
+                                f"🕒 {item['ad_date']} (Найдено: {current_time})"
                             )
                             try:
-                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
                             except Exception as err:
                                 logging.error(f"Ошибка отправки сообщения: {err}")
 
@@ -259,7 +345,7 @@ async def monitor_task():
 
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
-# ================= 6. ТОЧКА ВХОДА =================
+# ================= 7. ТОЧКА ВХОДА =================
 async def main():
     init_db()
     asyncio.create_task(monitor_task())
