@@ -14,7 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, 
-    ReplyKeyboardMarkup, KeyboardButton, WebAppInfo,
+    ReplyKeyboardMarkup, KeyboardButton,
     PreCheckoutQuery, LabeledPrice
 )
 
@@ -22,16 +22,12 @@ from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
 # ================= 1. НАСТРОЙКИ =================
-# Токен берется из переменных окружения BOT_TOKEN (или впишите новый токен вторым аргументом в кавычках, если вставляете прямо на закрытом Bothost)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("ОШИБКА: Переменная окружения BOT_TOKEN не задана в настройках хостинга!")
 
 CHECK_INTERVAL_SECONDS = 40
 DB_PATH = "data/bot_database.db"
-
-# Ссылка на ваш Mini App на GitHub Pages:
-MINI_APP_URL = "https://bablwwwkvas228-commits.github.io/avitobot-webapp/"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -120,9 +116,33 @@ def set_subscription(user_id: int, days: int, plan: str = "pro") -> str:
     conn.close()
     return new_sub_date.strftime("%d.%m.%Y %H:%M")
 
-def check_subscription(user_id: int) -> tuple[bool, str]:
+def check_subscription(user_id: int) -> tuple[bool, str, str]:
     tz_moscow = timezone(timedelta(hours=3))
     now = datetime.now(tz_moscow)
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT sub_until, plan FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row or not row[0]:
+        return False, "Не активна", "free"
+        
+    try:
+        sub_date = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz_moscow)
+        plan = row[1] or "trial"
+        if sub_date > now:
+            return True, sub_date.strftime("%d.%m.%Y %H:%M"), plan
+        else:
+            return False, "Истекла", plan
+    except Exception:
+        return False, "Не активна", "free"
+
+def get_user_search_limit(user_id: int) -> int:
+    is_active, _, plan = check_subscription(user_id)
+    if not is_active:
+        return 0
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -130,17 +150,26 @@ def check_subscription(user_id: int) -> tuple[bool, str]:
     row = cursor.fetchone()
     conn.close()
     
-    if not row or not row[0]:
-        return False, "Не активна"
+    # Определяем лимит по длительности подписки
+    # Если пробный период (2 дня) — 2 поиска
+    if plan == "trial":
+        return 2
         
+    # Вычисляем общие дни подписки до конца
     try:
+        tz_moscow = timezone(timedelta(hours=3))
         sub_date = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz_moscow)
-        if sub_date > now:
-            return True, sub_date.strftime("%d.%m.%Y %H:%M")
-        else:
-            return False, "Истекла"
+        now = datetime.now(tz_moscow)
+        total_days = (sub_date - now).days
+        
+        if total_days > 100:  # Тариф на 9 месяцев (270 дней) или более
+            return 15
+        elif total_days > 45: # Тариф на 3 месяца (90 дней)
+            return 15
+        else:                 # Тариф на месяц (30 дней)
+            return 5
     except Exception:
-        return False, "Не активна"
+        return 5
 
 def add_search(user_id: int, url: str, max_price: int):
     conn = sqlite3.connect(DB_PATH)
@@ -233,43 +262,46 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     }
-    try:
-        async with AsyncSession(impersonate="chrome120") as session:
-            resp = await session.get(target_url, headers=headers, timeout=20)
-            if resp.status_code != 200:
-                return []
-            soup = BeautifulSoup(resp.text, "html.parser")
-            cards = soup.select('div[data-marker="item"]')
+    for attempt in range(2):
+        try:
+            async with AsyncSession(impersonate="chrome120") as session:
+                resp = await session.get(target_url, headers=headers, timeout=35)
+                if resp.status_code != 200:
+                    return []
+                soup = BeautifulSoup(resp.text, "html.parser")
+                cards = soup.select('div[data-marker="item"]')
 
-            for card in cards:
-                item_id = card.get("data-item-id")
-                if not item_id:
-                    continue
-                title_elem = card.select_one('[data-marker="item-title"]')
-                title = title_elem.get_text(strip=True) if title_elem else "Без названия"
-                raw_href = title_elem.get("href") if title_elem else ""
-                url = f"https://www.avito.ru{raw_href}" if raw_href.startswith("/") else raw_href
-                price_meta = card.select_one('meta[itemprop="price"]')
-                price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
+                for card in cards:
+                    item_id = card.get("data-item-id")
+                    if not item_id:
+                        continue
+                    title_elem = card.select_one('[data-marker="item-title"]')
+                    title = title_elem.get_text(strip=True) if title_elem else "Без названия"
+                    raw_href = title_elem.get("href") if title_elem else ""
+                    url = f"https://www.avito.ru{raw_href}" if raw_href.startswith("/") else raw_href
+                    price_meta = card.select_one('meta[itemprop="price"]')
+                    price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
 
-                location = "Локация не указана"
-                geo_elem = card.find(attrs={"data-marker": "item-address"}) or card.select_one('[class*="geo-"]')
-                if geo_elem:
-                    location = geo_elem.get_text(separator=" ", strip=True)
+                    location = "Локация не указана"
+                    geo_elem = card.find(attrs={"data-marker": "item-address"}) or card.select_one('[class*="geo-"]')
+                    if geo_elem:
+                        location = geo_elem.get_text(separator=" ", strip=True)
 
-                date_elem = card.select_one('[data-marker="item-date"]')
-                raw_date = date_elem.get_text(strip=True) if date_elem else ""
-                ad_date = parse_avito_date(raw_date)
+                    date_elem = card.select_one('[data-marker="item-date"]')
+                    raw_date = date_elem.get_text(strip=True) if date_elem else ""
+                    ad_date = parse_avito_date(raw_date)
 
-                results.append({
-                    "id": item_id, "title": title, "price": price,
-                    "url": url, "location": location, "ad_date": ad_date
-                })
-    except Exception as e:
-        logging.error(f"Ошибка запроса: {e}")
+                    results.append({
+                        "id": item_id, "title": title, "price": price,
+                        "url": url, "location": location, "ad_date": ad_date
+                    })
+                return results
+        except Exception as e:
+            logging.error(f"Попытка {attempt + 1} - Ошибка запроса к Авито: {e}")
+            await asyncio.sleep(5)
     return results
 
-# ================= 4. TELEGRAM БОТ (Интерфейс и Mini App) =================
+# ================= 4. TELEGRAM БОТ =================
 class SearchForm(StatesGroup):
     waiting_for_url = State()
     waiting_for_price = State()
@@ -277,7 +309,6 @@ class SearchForm(StatesGroup):
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# 1. Теперь кнопка "💎 Подписка / Тарифы" обычная (без WebAppInfo)
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="➕ Добавить поиск"), KeyboardButton(text="📋 Мои поиски")],
@@ -287,29 +318,26 @@ main_keyboard = ReplyKeyboardMarkup(
     input_field_placeholder="Выберите действие..."
 )
 
-# 2. Обновленный /start (принимает запрос на покупку из кнопки меню @BotFather)
 @dp.message(CommandStart())
 async def cmd_start(msg: Message):
     register_user(msg.from_user.id, msg.from_user.username)
     
     args = msg.text.split()
     if len(args) > 1:
-        # Обработка бесплатного пробного тарифа
         if args[1].startswith("free_"):
             try:
                 days = int(args[1].split("_")[1])
                 until_str = set_subscription(msg.from_user.id, days, plan="trial")
                 await msg.answer(
                     f"🎉 <b>Пробный период активирован!</b>\n"
-                    f"Вам добавлено <b>{days} дня(дней)</b> бесплатного доступа.\n"
+                    f"Вам добавлено <b>{days} дня(дней)</b> бесплатного доступа (лимит: 2 поиска).\n"
                     f"Действует до: <b>{until_str} МСК</b> 🚀",
                     parse_mode="HTML"
                 )
                 return
             except Exception as e:
-                logging.error(f"Ошибка активации бесплатного тарифа: {e}")
+                logging.error(f"Ошибка активации пробного периода: {e}")
                 
-        # Обработка платного тарифа через Stars
         elif args[1].startswith("buy_"):
             try:
                 _, days_str, stars_str = args[1].split("_")
@@ -325,9 +353,9 @@ async def cmd_start(msg: Message):
                 )
                 return
             except Exception as e:
-                logging.error(f"Ошибка выставления счета через start: {e}")
+                logging.error(f"Ошибка выставления счета: {e}")
 
-    is_active, sub_text = check_subscription(msg.from_user.id)
+    is_active, sub_text, _ = check_subscription(msg.from_user.id)
     status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
     
     await msg.answer(
@@ -339,16 +367,6 @@ async def cmd_start(msg: Message):
         parse_mode="HTML"
     )
 
-# 3. Обработчик обычной кнопки "💎 Подписка / Тарифы"
-@dp.message(F.text == "💎 Подписка / Тарифы")
-async def btn_sub_info(msg: Message):
-    is_active, sub_text = check_subscription(msg.from_user.id)
-    status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
-    await msg.answer(
-        f"💎 <b>Статус вашей подписки:</b> {status_emoji}\n\n"
-        f"Для выбора тарифа и оплаты нажмите на синюю кнопку <b>меню (слева от поля ввода сообщения)</b> 👇",
-        parse_mode="HTML"
-    )
 @dp.message(Command("give_sub"))
 async def cmd_give_sub(msg: Message):
     parts = msg.text.split()
@@ -363,33 +381,10 @@ async def cmd_give_sub(msg: Message):
     except ValueError:
         await msg.answer("❌ Ошибка в числах.")
 
-# Прием данных из Mini App и выставление счета в Telegram Stars
-@dp.message(F.web_app_data)
-async def handle_web_app_data(msg: Message):
-    try:
-        data = json.loads(msg.web_app_data.data)
-        days = int(data.get("days", 7))
-        stars = int(data.get("stars", 15))
-        
-        prices = [LabeledPrice(label=f"Подписка на {days} дней", amount=stars)]
-        await bot.send_invoice(
-            chat_id=msg.from_user.id,
-            title=f"Подписка на Авито Менеджер ({days} дн.)",
-            description=f"Активация доступа к мониторингу объявлений на {days} дней.",
-            payload=f"sub_{days}_days",
-            currency="XTR",  # Валюта Telegram Stars
-            prices=prices
-        )
-    except Exception as e:
-        logging.error(f"Ошибка обработки WebApp data: {e}")
-        await msg.answer("⚠️ Произошла ошибка при формировании счета.")
-
-# Подтверждение готовности принять оплату
 @dp.pre_checkout_query()
 async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
-# Автоматическая выдача подписки после оплаты звездами
 @dp.message(F.successful_payment)
 async def successful_payment_handler(msg: Message):
     payload = msg.successful_payment.invoice_payload
@@ -405,9 +400,22 @@ async def successful_payment_handler(msg: Message):
 
 @dp.message(F.text == "➕ Добавить поиск")
 async def btn_add(msg: Message, state: FSMContext):
-    is_active, _ = check_subscription(msg.from_user.id)
+    is_active, _, _ = check_subscription(msg.from_user.id)
     if not is_active:
-        await msg.answer("⛔️ У вас истек пробный период или подписка. Нажмите «💎 Подписка / Тарифы» для продления!")
+        await msg.answer("⛔️ У вас истекла подписка. Откройте меню Mini App для продления!")
+        return
+
+    # Проверяем лимит поисков по тарифу
+    user_searches = [s for s in get_all_searches() if s[1] == msg.from_user.id]
+    max_limit = get_user_search_limit(msg.from_user.id)
+    
+    if len(user_searches) >= max_limit:
+        await msg.answer(
+            f"⚠️ <b>Достигнут лимит поисков!</b>\n"
+            f"Ваш текущий тариф позволяет иметь не более <b>{max_limit}</b> активных поисков.\n"
+            f"Удалите один из старых поисков во вкладке «📋 Мои поиски» или перейдите на более высокий тариф.",
+            parse_mode="HTML"
+        )
         return
 
     await msg.answer("🔗 Отправьте <b>ссылку на поиск с Авито</b>:", parse_mode="HTML")
@@ -438,9 +446,12 @@ async def process_price(msg: Message, state: FSMContext):
 @dp.message(F.text == "📋 Мои поиски")
 async def btn_list(msg: Message):
     searches = [s for s in get_all_searches() if s[1] == msg.from_user.id]
+    max_limit = get_user_search_limit(msg.from_user.id)
     if not searches:
-        await msg.answer("У вас нет активных поисков.")
+        await msg.answer(f"У вас нет активных поисков (лимит: {len(searches)}/{max_limit}).")
         return
+    
+    await msg.answer(f"📋 Ваши активные поиски ({len(searches)} из {max_limit}):")
     for s_id, _, url, max_price in searches:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{s_id}")]])
         await msg.answer(f"🔍 Поиск #{s_id}\n💰 Лимит: до {max_price:,} ₽\n🔗 <a href='{url}'>Ссылка на Авито</a>", reply_markup=kb, parse_mode="HTML")
@@ -451,12 +462,26 @@ async def delete_callback(callback: CallbackQuery):
     await callback.message.edit_text("❌ Поиск удален.")
     await callback.answer()
 
+@dp.message(F.text == "💎 Подписка / Тарифы")
+async def btn_sub_info(msg: Message):
+    is_active, sub_text, _ = check_subscription(msg.from_user.id)
+    status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
+    max_limit = get_user_search_limit(msg.from_user.id)
+    user_searches_count = len([s for s in get_all_searches() if s[1] == msg.from_user.id])
+    
+    await msg.answer(
+        f"💎 <b>Статус подписки:</b> {status_emoji}\n"
+        f"📊 Активных поисков: <b>{user_searches_count} из {max_limit}</b>\n\n"
+        f"Для выбора тарифа и оплаты нажмите на синюю кнопку <b>меню (слева от поля ввода)</b> 👇",
+        parse_mode="HTML"
+    )
+
 # ================= 5. ФОНОВЫЙ МОНИТОРИНГ =================
 async def monitor_task():
     while True:
         try:
             for s_id, user_id, url, max_price in get_all_searches():
-                is_active, _ = check_subscription(user_id)
+                is_active, _, _ = check_subscription(user_id)
                 if not is_active:
                     continue
 
@@ -486,7 +511,7 @@ async def monitor_task():
 async def main():
     init_db()
     asyncio.create_task(monitor_task())
-    logging.info("Бот запущен с поддержкой Mini App и Telegram Stars...")
+    logging.info("Бот запущен с лимитами поисков и поддержкой Telegram Stars...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
