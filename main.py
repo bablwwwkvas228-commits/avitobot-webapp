@@ -3,7 +3,6 @@ import logging
 import sqlite3
 import os
 import re
-import json
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
@@ -46,6 +45,12 @@ def init_db():
         )
     """)
     
+    # Проверяем наличие колонки plan, если таблица старая
+    cursor.execute("PRAGMA table_info(users)")
+    user_columns = [col[1] for col in cursor.fetchall()]
+    if "plan" not in user_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN plan TEXT DEFAULT 'free'")
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS searches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,14 +84,14 @@ def register_user(user_id: int, username: str):
         trial_until = (datetime.now(tz_moscow) + timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute(
             "INSERT INTO users (user_id, username, sub_until, plan) VALUES (?, ?, ?, ?)",
-            (user_id, username or "User", trial_until, "trial")
+            (user_id, username or "User", trial_until, "start")
         )
     else:
         cursor.execute("UPDATE users SET username = ? WHERE user_id = ?", (username or "User", user_id))
     conn.commit()
     conn.close()
 
-def set_subscription(user_id: int, days: int, plan: str = "pro") -> str:
+def set_subscription(user_id: int, days: int, plan: str = "start") -> str:
     tz_moscow = timezone(timedelta(hours=3))
     now = datetime.now(tz_moscow)
     
@@ -127,49 +132,27 @@ def check_subscription(user_id: int) -> tuple[bool, str, str]:
     conn.close()
     
     if not row or not row[0]:
-        return False, "Не активна", "free"
+        return False, "Не активна", "start"
         
     try:
         sub_date = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz_moscow)
-        plan = row[1] or "trial"
+        plan = row[1] or "start"
         if sub_date > now:
             return True, sub_date.strftime("%d.%m.%Y %H:%M"), plan
         else:
             return False, "Истекла", plan
     except Exception:
-        return False, "Не активна", "free"
+        return False, "Не активна", "start"
 
 def get_user_search_limit(user_id: int) -> int:
     is_active, _, plan = check_subscription(user_id)
     if not is_active:
         return 0
     
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT sub_until FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    # Определяем лимит по длительности подписки
-    # Если пробный период (2 дня) — 2 поиска
-    if plan == "trial":
-        return 2
-        
-    # Вычисляем общие дни подписки до конца
-    try:
-        tz_moscow = timezone(timedelta(hours=3))
-        sub_date = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz_moscow)
-        now = datetime.now(tz_moscow)
-        total_days = (sub_date - now).days
-        
-        if total_days > 100:  # Тариф на 9 месяцев (270 дней) или более
-            return 15
-        elif total_days > 45: # Тариф на 3 месяца (90 дней)
-            return 15
-        else:                 # Тариф на месяц (30 дней)
-            return 5
-    except Exception:
-        return 5
+    # Лимиты: для Start — до 3 поисков, для Pro — до 15 поисков
+    if plan == "pro":
+        return 15
+    return 3
 
 def add_search(user_id: int, url: str, max_price: int):
     conn = sqlite3.connect(DB_PATH)
@@ -324,13 +307,14 @@ async def cmd_start(msg: Message):
     
     args = msg.text.split()
     if len(args) > 1:
+        # Бесплатный пробный период (2 дня, тариф Start)
         if args[1].startswith("free_"):
             try:
                 days = int(args[1].split("_")[1])
-                until_str = set_subscription(msg.from_user.id, days, plan="trial")
+                until_str = set_subscription(msg.from_user.id, days, plan="start")
                 await msg.answer(
-                    f"🎉 <b>Пробный период активирован!</b>\n"
-                    f"Вам добавлено <b>{days} дня(дней)</b> бесплатного доступа (лимит: 2 поиска).\n"
+                    f"🎉 <b>Пробный период Start активирован!</b>\n"
+                    f"Вам добавлено <b>{days} дня(дней)</b> бесплатного доступа (лимит: до 3 поисков).\n"
                     f"Действует до: <b>{until_str} МСК</b> 🚀",
                     parse_mode="HTML"
                 )
@@ -338,16 +322,21 @@ async def cmd_start(msg: Message):
             except Exception as e:
                 logging.error(f"Ошибка активации пробного периода: {e}")
                 
+        # Покупка платных тарифов через Stars (start или pro)
         elif args[1].startswith("buy_"):
             try:
-                _, days_str, stars_str = args[1].split("_")
+                # Формат: buy_start_30_100 или buy_pro_30_200
+                _, plan_type, days_str, stars_str = args[1].split("_")
                 days, stars = int(days_str), int(stars_str)
-                prices = [LabeledPrice(label=f"Подписка на {days} дней", amount=stars)]
+                
+                plan_title = "Start" if plan_type == "start" else "Pro (Всё включено)"
+                prices = [LabeledPrice(label=f"Тариф {plan_title} ({days} дн.)", amount=stars)]
+                
                 await bot.send_invoice(
                     chat_id=msg.from_user.id,
-                    title=f"Подписка на Авито Менеджер ({days} дн.)",
-                    description=f"Активация доступа к мониторингу объявлений на {days} дней.",
-                    payload=f"sub_{days}_days",
+                    title=f"FlipRadar • Тариф {plan_title} ({days} дн.)",
+                    description=f"Активация подписки FlipRadar на {days} дней.",
+                    payload=f"sub_{plan_type}_{days}",
                     currency="XTR",
                     prices=prices
                 )
@@ -355,11 +344,11 @@ async def cmd_start(msg: Message):
             except Exception as e:
                 logging.error(f"Ошибка выставления счета: {e}")
 
-    is_active, sub_text, _ = check_subscription(msg.from_user.id)
-    status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
+    is_active, sub_text, plan = check_subscription(msg.from_user.id)
+    status_emoji = f"🟢 Активна до {sub_text} ({plan.upper()})" if is_active else f"🔴 {sub_text}"
     
     await msg.answer(
-        f"👋 <b>Бот поиска свежих объявлений на Авито</b>\n\n"
+        f"👋 <b>FlipRadar • Бот мониторинга и аналитики</b>\n\n"
         f"🆔 Ваш ID: <code>{msg.from_user.id}</code>\n"
         f"💎 Подписка: <b>{status_emoji}</b>\n\n"
         f"Используйте кнопки ниже для управления:",
@@ -371,15 +360,16 @@ async def cmd_start(msg: Message):
 async def cmd_give_sub(msg: Message):
     parts = msg.text.split()
     if len(parts) < 3:
-        await msg.answer("ℹ️ Использование: <code>/give_sub ID_пользователя дни</code>", parse_mode="HTML")
+        await msg.answer("ℹ️ Использование: <code>/give_sub ID_пользователя дни [start/pro]</code>", parse_mode="HTML")
         return
     try:
         target_id = int(parts[1])
         days = int(parts[2])
-        until_str = set_subscription(target_id, days)
-        await msg.answer(f"✅ Пользователю <code>{target_id}</code> выдана подписка на {days} дн. до {until_str} МСК", parse_mode="HTML")
+        plan = parts[3] if len(parts) > 3 else "pro"
+        until_str = set_subscription(target_id, days, plan=plan)
+        await msg.answer(f"✅ Пользователю <code>{target_id}</code> выдана подписка <b>{plan.upper()}</b> на {days} дн. до {until_str} МСК", parse_mode="HTML")
     except ValueError:
-        await msg.answer("❌ Ошибка в числах.")
+        await msg.answer("❌ Ошибка в параметрах.")
 
 @dp.pre_checkout_query()
 async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
@@ -389,11 +379,17 @@ async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
 async def successful_payment_handler(msg: Message):
     payload = msg.successful_payment.invoice_payload
     if payload.startswith("sub_"):
-        days = int(payload.split("_")[1])
-        until_str = set_subscription(msg.from_user.id, days, plan="pro")
+        # payload формат: sub_start_30 или sub_pro_30
+        parts = payload.split("_")
+        plan_type = parts[1]
+        days = int(parts[2])
+        
+        until_str = set_subscription(msg.from_user.id, days, plan=plan_type)
+        plan_title = "Start" if plan_type == "start" else "Pro"
+        
         await msg.answer(
             f"🎉 <b>Оплата прошла успешно!</b>\n"
-            f"Вам добавлено <b>{days} дней</b> подписки.\n"
+            f"Активирован тариф <b>{plan_title}</b> на <b>{days} дней</b>.\n"
             f"Действует до: <b>{until_str} МСК</b> 🚀",
             parse_mode="HTML"
         )
@@ -402,18 +398,18 @@ async def successful_payment_handler(msg: Message):
 async def btn_add(msg: Message, state: FSMContext):
     is_active, _, _ = check_subscription(msg.from_user.id)
     if not is_active:
-        await msg.answer("⛔️ У вас истекла подписка. Откройте меню Mini App для продления!")
+        await msg.answer("⛔️ У вас истекла подписка. Откройте меню Mini App для выбора тарифа и продления!")
         return
 
-    # Проверяем лимит поисков по тарифу
+    # Проверяем лимит поисков по текущему тарифу
     user_searches = [s for s in get_all_searches() if s[1] == msg.from_user.id]
     max_limit = get_user_search_limit(msg.from_user.id)
     
     if len(user_searches) >= max_limit:
         await msg.answer(
             f"⚠️ <b>Достигнут лимит поисков!</b>\n"
-            f"Ваш текущий тариф позволяет иметь не более <b>{max_limit}</b> активных поисков.\n"
-            f"Удалите один из старых поисков во вкладке «📋 Мои поиски» или перейдите на более высокий тариф.",
+            f"Ваш тариф позволяет иметь не более <b>{max_limit}</b> активных поисков.\n"
+            f"Удалите старые поиски во вкладке «📋 Мои поиски» или перейдите на тариф Pro с лимитом до 15 поисков.",
             parse_mode="HTML"
         )
         return
@@ -448,7 +444,7 @@ async def btn_list(msg: Message):
     searches = [s for s in get_all_searches() if s[1] == msg.from_user.id]
     max_limit = get_user_search_limit(msg.from_user.id)
     if not searches:
-        await msg.answer(f"У вас нет активных поисков (лимит: {len(searches)}/{max_limit}).")
+        await msg.answer(f"У вас нет активных поисков (лимит: 0/{max_limit}).")
         return
     
     await msg.answer(f"📋 Ваши активные поиски ({len(searches)} из {max_limit}):")
@@ -464,13 +460,14 @@ async def delete_callback(callback: CallbackQuery):
 
 @dp.message(F.text == "💎 Подписка / Тарифы")
 async def btn_sub_info(msg: Message):
-    is_active, sub_text, _ = check_subscription(msg.from_user.id)
+    is_active, sub_text, plan = check_subscription(msg.from_user.id)
     status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
     max_limit = get_user_search_limit(msg.from_user.id)
     user_searches_count = len([s for s in get_all_searches() if s[1] == msg.from_user.id])
     
     await msg.answer(
         f"💎 <b>Статус подписки:</b> {status_emoji}\n"
+        f"⭐️ Уровень тарифа: <b>{plan.upper()}</b>\n"
         f"📊 Активных поисков: <b>{user_searches_count} из {max_limit}</b>\n\n"
         f"Для выбора тарифа и оплаты нажмите на синюю кнопку <b>меню (слева от поля ввода)</b> 👇",
         parse_mode="HTML"
@@ -511,7 +508,7 @@ async def monitor_task():
 async def main():
     init_db()
     asyncio.create_task(monitor_task())
-    logging.info("Бот запущен с лимитами поисков и поддержкой Telegram Stars...")
+    logging.info("FlipRadar запущен с поддержкой Start и Pro тарифов...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
