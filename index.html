@@ -113,20 +113,28 @@
             <div class="tariff-price" style="color: #27ae60;">Бесплатно</div>
         </div>
 
-        <div class="tariff-card" onclick="selectTariff(this, '30', 45, 'pay')">
+        <div class="tariff-card" onclick="selectTariff(this, '30', 100, 'pay')">
             <div class="tariff-info">
                 <h3>Месяц</h3>
                 <p>30 дней доступа</p>
             </div>
-            <div class="tariff-price">⭐ 45</div>
+            <div class="tariff-price">⭐ 100</div>
         </div>
 
-        <div class="tariff-card" onclick="selectTariff(this, '90', 120, 'pay')">
+        <div class="tariff-card" onclick="selectTariff(this, '90', 200, 'pay')">
             <div class="tariff-info">
-                <h3>Квартал</h3>
-                <p>90 дней доступа (выгода)</p>
+                <h3>3 месяца</h3>
+                <p>90 дней доступа</p>
             </div>
-            <div class="tariff-price">⭐ 120</div>
+            <div class="tariff-price">⭐ 200</div>
+        </div>
+
+        <div class="tariff-card" onclick="selectTariff(this, '270', 500, 'pay')">
+            <div class="tariff-info">
+                <h3>9 месяцев</h3>
+                <p>270 дней (супер выгода)</p>
+            </div>
+            <div class="tariff-price">⭐ 500</div>
         </div>
     </div>
 
@@ -136,7 +144,6 @@
         let tg = window.Telegram.WebApp;
         tg.expand();
 
-        // Вставьте юзернейм вашего бота БЕЗ собачки @
         const BOT_USERNAME = "Parrrs3r_Bot";
 
         let selectedDays = '2';
@@ -160,10 +167,8 @@
 
         function buySubscription() {
             if (tariffType === 'free') {
-                // Если выбран бесплатный тариф — переходим в бот для активации пробного периода
                 tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=free_${selectedDays}`);
             } else {
-                // Если платный — отправляем запрос на счет в бот
                 tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=buy_${selectedDays}_${selectedStars}`);
             }
             tg.close();
