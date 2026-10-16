@@ -132,9 +132,12 @@
 
     <button class="buy-btn" id="payButton" onclick="buySubscription()">Купить за ⭐ 15</button>
 
-    <script>
+   <script>
         let tg = window.Telegram.WebApp;
         tg.expand();
+
+        // ВПИШИТЕ СЮДА ЮЗЕРНЕЙМ ВАШЕГО БОТА БЕЗ СОБАЧКИ @ (например: "my_avito_parser_bot")
+        const BOT_USERNAME = "ЮЗЕРНЕЙМ_ВАШЕГО_БОТА";
 
         let selectedDays = '7';
         let selectedStars = 15;
@@ -148,12 +151,9 @@
         }
 
         function buySubscription() {
-            // Отправляем данные обратно боту через WebApp Data
-            const data = JSON.stringify({
-                days: selectedDays,
-                stars: selectedStars
-            });
-            tg.sendData(data);
+            // Передаем выбранный тариф прямо в команду /start бота и закрываем окно Mini App
+            tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=buy_${selectedDays}_${selectedStars}`);
+            tg.close();
         }
     </script>
 </body>
