@@ -377,8 +377,8 @@ async def monitor_task():
                                 f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
                                 f"🌍 {item['location']}\n"
                                 f"📊 {stats_text}\n\n"
-                                f"🔗 {item['url']}\n\n"
-                                f"🕒 Опубликовано: {item['ad_date']} (Бот нашел: {current_time})"
+                                f"🕒 Опубликовано: {item['ad_date']} (Бот нашел: {current_time})\n\n"
+                                f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
                             )
                             try:
                                 await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
