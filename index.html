@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Подписка на Авито Менеджер</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        :root {
+            --bg-color: var(--tg-theme-bg-color, #fefefe);
+            --text-color: var(--tg-theme-text-color, #222222);
+            --hint-color: var(--tg-theme-hint-color, #707579);
+            --button-color: var(--tg-theme-button-color, #2481cc);
+            --button-text-color: var(--tg-theme-button-text-color, #ffffff);
+            --card-bg: var(--tg-theme-secondary-bg-color, #f4f4f5);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h2 {
+            margin-bottom: 4px;
+            text-align: center;
+        }
+
+        .subtitle {
+            color: var(--hint-color);
+            font-size: 14px;
+            text-align: center;
+            margin-bottom: 24px;
+        }
+
+        .tariffs-container {
+            width: 100%;
+            max-width: 400px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .tariff-card {
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            padding: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: all 0.2s ease;
+        }
+
+        .tariff-card.selected {
+            border-color: var(--button-color);
+        }
+
+        .tariff-info h3 {
+            margin: 0 0 4px 0;
+            font-size: 16px;
+        }
+
+        .tariff-info p {
+            margin: 0;
+            font-size: 13px;
+            color: var(--hint-color);
+        }
+
+        .tariff-price {
+            font-weight: bold;
+            font-size: 16px;
+            color: var(--button-color);
+        }
+
+        .buy-btn {
+            background-color: var(--button-color);
+            color: var(--button-text-color);
+            border: none;
+            border-radius: 10px;
+            padding: 14px;
+            width: 100%;
+            max-width: 400px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 24px;
+            text-align: center;
+        }
+
+        .buy-btn:active {
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>💎 Выбор подписки</h2>
+    <div class="subtitle">Выберите подходящий тариф для отслеживания объявлений</div>
+
+    <div class="tariffs-container">
+        <div class="tariff-card selected" onclick="selectTariff(this, '7', 15)">
+            <div class="tariff-info">
+                <h3>Неделя</h3>
+                <p>7 дней доступа</p>
+            </div>
+            <div class="tariff-price">⭐ 15</div>
+        </div>
+
+        <div class="tariff-card" onclick="selectTariff(this, '30', 45)">
+            <div class="tariff-info">
+                <h3>Месяц</h3>
+                <p>30 дней доступа</p>
+            </div>
+            <div class="tariff-price">⭐ 45</div>
+        </div>
+
+        <div class="tariff-card" onclick="selectTariff(this, '90', 120)">
+            <div class="tariff-info">
+                <h3>Квартал</h3>
+                <p>90 дней доступа (выгода)</p>
+            </div>
+            <div class="tariff-price">⭐ 120</div>
+        </div>
+    </div>
+
+    <button class="buy-btn" id="payButton" onclick="buySubscription()">Купить за ⭐ 15</button>
+
+    <script>
+        let tg = window.Telegram.WebApp;
+        tg.expand();
+
+        let selectedDays = '7';
+        let selectedStars = 15;
+
+        function selectTariff(element, days, stars) {
+            document.querySelectorAll('.tariff-card').forEach(card => card.classList.remove('selected'));
+            element.classList.add('selected');
+            selectedDays = days;
+            selectedStars = stars;
+            document.getElementById('payButton').innerText = `Купить за ⭐ ${stars}`;
+        }
+
+        function buySubscription() {
+            // Отправляем данные обратно боту через WebApp Data
+            const data = JSON.stringify({
+                days: selectedDays,
+                stars: selectedStars
+            });
+            tg.sendData(data);
+        }
+    </script>
+</body>
+</html>
