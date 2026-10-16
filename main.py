@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sqlite3
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
@@ -18,13 +19,27 @@ from bs4 import BeautifulSoup
 # ================= 1. НАСТРОЙКИ =================
 BOT_TOKEN = "8735276903:AAH-0nm_PSEaMHZ3Bqk76rAKDZArYlpLfoc"
 CHECK_INTERVAL_SECONDS = 40  # Пауза между проверками
+DB_PATH = "data/bot_database.db"  # Папка data сохраняется при пересборках на Bothost
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ================= 2. БАЗА ДАННЫХ =================
 def init_db():
-    conn = sqlite3.connect("bot_database.db")
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    
+    # Таблица пользователей и подписок
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            sub_until TEXT,
+            plan TEXT DEFAULT 'free'
+        )
+    """)
+    
+    # Таблица поисков
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS searches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,23 +48,100 @@ def init_db():
             max_price INTEGER
         )
     """)
+    
+    # Таблица просмотренных объявлений (с привязкой к конкретному поиску!)
+    cursor.execute("PRAGMA table_info(seen_items)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if columns and "search_id" not in columns:
+        # Пересоздаем старую таблицу, если она была без search_id
+        cursor.execute("DROP TABLE seen_items")
+        
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS seen_items (
-            item_id TEXT PRIMARY KEY
+            search_id INTEGER,
+            item_id TEXT,
+            PRIMARY KEY (search_id, item_id)
         )
     """)
     conn.commit()
     conn.close()
 
+def register_user(user_id: int, username: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    if not cursor.fetchone():
+        # Новым пользователям можно давать, например, 1 пробный день (или оставлять без подписки)
+        cursor.execute(
+            "INSERT INTO users (user_id, username, sub_until, plan) VALUES (?, ?, ?, ?)",
+            (user_id, username or "User", None, "free")
+        )
+    else:
+        cursor.execute("UPDATE users SET username = ? WHERE user_id = ?", (username or "User", user_id))
+    conn.commit()
+    conn.close()
+
+def set_subscription(user_id: int, days: int, plan: str = "pro") -> str:
+    tz_moscow = timezone(timedelta(hours=3))
+    now = datetime.now(tz_moscow)
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT sub_until FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    
+    base_date = now
+    if row and row[0]:
+        try:
+            current_sub = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz_moscow)
+            if current_sub > now:
+                base_date = current_sub
+        except Exception:
+            pass
+            
+    new_sub_date = base_date + timedelta(days=days)
+    new_sub_str = new_sub_date.strftime("%Y-%m-%d %H:%M:%S")
+    
+    cursor.execute("""
+        INSERT INTO users (user_id, username, sub_until, plan)
+        VALUES (?, 'User', ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET sub_until = ?, plan = ?
+    """, (user_id, new_sub_str, plan, new_sub_str, plan))
+    conn.commit()
+    conn.close()
+    return new_sub_date.strftime("%d.%m.%Y %H:%M")
+
+def check_subscription(user_id: int) -> tuple[bool, str]:
+    tz_moscow = timezone(timedelta(hours=3))
+    now = datetime.now(tz_moscow)
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT sub_until FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row or not row[0]:
+        return False, "Не активна"
+        
+    try:
+        sub_date = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz_moscow)
+        if sub_date > now:
+            return True, sub_date.strftime("%d.%m.%Y %H:%M")
+        else:
+            return False, "Истекла"
+    except Exception:
+        return False, "Не активна"
+
 def add_search(user_id: int, url: str, max_price: int):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("INSERT INTO searches (user_id, url, max_price) VALUES (?, ?, ?)", (user_id, url, max_price))
     conn.commit()
     conn.close()
 
 def get_all_searches():
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT id, user_id, url, max_price FROM searches")
     rows = cursor.fetchall()
@@ -57,24 +149,25 @@ def get_all_searches():
     return rows
 
 def delete_search(search_id: int):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM searches WHERE id = ?", (search_id,))
+    cursor.execute("DELETE FROM seen_items WHERE search_id = ?", (search_id,))
     conn.commit()
     conn.close()
 
-def is_item_seen(item_id: str) -> bool:
-    conn = sqlite3.connect("bot_database.db")
+def is_item_seen(search_id: int, item_id: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM seen_items WHERE item_id = ?", (item_id,))
+    cursor.execute("SELECT 1 FROM seen_items WHERE search_id = ? AND item_id = ?", (search_id, item_id))
     result = cursor.fetchone()
     conn.close()
     return result is not None
 
-def mark_item_as_seen(item_id: str):
-    conn = sqlite3.connect("bot_database.db")
+def mark_item_as_seen(search_id: int, item_id: str):
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
+    cursor.execute("INSERT OR IGNORE INTO seen_items (search_id, item_id) VALUES (?, ?)", (search_id, item_id))
     conn.commit()
     conn.close()
 
@@ -116,12 +209,12 @@ def parse_avito_date(date_str: str) -> str:
 
         match_today = re.search(r'сегодня\s*(?:в)?\s*(\d{1,2}):(\d{2})', date_str)
         if match_today:
-            dt = now.replace(hour=int(match_today.group(1)), minute=int(match_today.group(2)))
+            dt = now.replace(hour=int(match_today.group(1)), minute=int(match_today.group(2)), second=0, microsecond=0)
             return dt.strftime("%d.%m.%Y %H:%M")
 
         match_yesterday = re.search(r'вчера\s*(?:в)?\s*(\d{1,2}):(\d{2})', date_str)
         if match_yesterday:
-            dt = (now - timedelta(days=1)).replace(hour=int(match_yesterday.group(1)), minute=int(match_yesterday.group(2)))
+            dt = (now - timedelta(days=1)).replace(hour=int(match_yesterday.group(1)), minute=int(match_yesterday.group(2)), second=0, microsecond=0)
             return dt.strftime("%d.%m.%Y %H:%M")
 
         return date_str.capitalize()
@@ -254,8 +347,8 @@ dp = Dispatcher(storage=MemoryStorage())
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="➕ Добавить поиск")],
-        [KeyboardButton(text="📋 Мои поиски")]
+        [KeyboardButton(text="➕ Добавить поиск"), KeyboardButton(text="📋 Мои поиски")],
+        [KeyboardButton(text="💎 Подписка / Профиль")]
     ],
     resize_keyboard=True,
     input_field_placeholder="Выберите действие..."
@@ -263,6 +356,7 @@ main_keyboard = ReplyKeyboardMarkup(
 
 @dp.message(CommandStart())
 async def cmd_start(msg: Message):
+    register_user(msg.from_user.id, msg.from_user.username)
     await msg.answer(
         "👋 <b>Бот поиска свежих объявлений на Авито</b>\n\n"
         "Выберите действие на клавиатуре ниже:",
@@ -270,8 +364,54 @@ async def cmd_start(msg: Message):
         parse_mode="HTML"
     )
 
+@dp.message(Command("give_sub"))
+async def cmd_give_sub(msg: Message):
+    """Команда для выдачи подписки: /give_sub USER_ID DAYS"""
+    parts = msg.text.split()
+    if len(parts) < 3:
+        await msg.answer("ℹ️ Использование: <code>/give_sub ID_пользователя количество_дней</code>\nНапример: <code>/give_sub 123456789 30</code>", parse_mode="HTML")
+        return
+    try:
+        target_id = int(parts[1])
+        days = int(parts[2])
+        until_str = set_subscription(target_id, days)
+        await msg.answer(f"✅ Пользователю <code>{target_id}</code> выдана подписка на {days} дн. (до {until_str} МСК)", parse_mode="HTML")
+        try:
+            await bot.send_message(target_id, f"🎉 Вам активирована подписка до <b>{until_str} (МСК)</b>!", parse_mode="HTML")
+        except Exception:
+            pass
+    except ValueError:
+        await msg.answer("❌ Ошибка: ID пользователя и количество дней должны быть числами.")
+
+@dp.message(F.text == "💎 Подписка / Профиль")
+async def btn_profile(msg: Message):
+    register_user(msg.from_user.id, msg.from_user.username)
+    is_active, sub_text = check_subscription(msg.from_user.id)
+    status_emoji = "🟢 Активна до " + sub_text if is_active else "🔴 " + sub_text
+    
+    searches = get_all_searches()
+    user_searches_count = len([s for s in searches if s[1] == msg.from_user.id])
+
+    await msg.answer(
+        f"👤 <b>Ваш профиль</b>\n\n"
+        f"🆔 Ваш ID: <code>{msg.from_user.id}</code>\n"
+        f"💎 Статус подписки: <b>{status_emoji}</b>\n"
+        f"🔍 Активных поисков: <b>{user_searches_count}</b>\n\n"
+        f"<i>Скоро здесь появится кнопка открытия Mini App для удобного управления тарифами!</i>",
+        parse_mode="HTML"
+    )
+
 @dp.message(F.text == "➕ Добавить поиск")
 async def btn_add(msg: Message, state: FSMContext):
+    is_active, _ = check_subscription(msg.from_user.id)
+    if not is_active:
+        await msg.answer(
+            "⛔️ <b>У вас нет активной подписки!</b>\n\n"
+            "Перейдите в раздел «💎 Подписка / Профиль», чтобы узнать ваш ID и активировать доступ.",
+            parse_mode="HTML"
+        )
+        return
+
     await msg.answer("🔗 Отправьте <b>ссылку на поиск с Авито</b>:", parse_mode="HTML")
     await state.set_state(SearchForm.waiting_for_url)
 
@@ -303,7 +443,8 @@ async def process_price(msg: Message, state: FSMContext):
         f"✅ <b>Поиск успешно добавлен!</b>\n"
         f"💰 Макс. цена: {max_price:,} ₽\n\n"
         f"Бот отслеживает новые объявления.",
-        reply_markup=main_keyboard
+        reply_markup=main_keyboard,
+        parse_mode="HTML"
     )
 
 @dp.message(F.text == "📋 Мои поиски")
@@ -322,7 +463,7 @@ async def btn_list(msg: Message):
         await msg.answer(
             f"🔍 <b>Поиск #{s_id}</b>\n"
             f"💰 Лимит: до {max_price:,} ₽\n"
-            f"🔗 <a href='{url}'>Ссылка поиска</a>",
+            f"🔗 <a href='{url}'>Открыть поиск на Авито</a>",
             reply_markup=kb,
             parse_mode="HTML"
         )
@@ -340,6 +481,11 @@ async def monitor_task():
         try:
             searches = get_all_searches()
             for s_id, user_id, url, max_price in searches:
+                # Проверяем, активна ли подписка у владельца поиска
+                is_active, _ = check_subscription(user_id)
+                if not is_active:
+                    continue
+
                 items = await fetch_ads_direct(url)
                 
                 if not items:
@@ -348,8 +494,8 @@ async def monitor_task():
                 for item in items:
                     item_id = item["id"]
 
-                    if not is_item_seen(item_id):
-                        mark_item_as_seen(item_id)
+                    if not is_item_seen(s_id, item_id):
+                        mark_item_as_seen(s_id, item_id)
 
                         if 0 < item["price"] <= max_price:
                             avg_price = get_model_average(item["title"], items)
@@ -367,9 +513,6 @@ async def monitor_task():
                             else:
                                 stats_text = "🤷‍♂️ Нет данных для сравнения точной модели"
 
-                            tz_moscow = timezone(timedelta(hours=3))
-                            current_time = datetime.now(tz_moscow).strftime("%H:%M")
-
                             safe_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
                             
                             text = (
@@ -377,6 +520,7 @@ async def monitor_task():
                                 f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
                                 f"🌍 {item['location']}\n"
                                 f"📊 {stats_text}\n\n"
+                                f"🕒 Опубликовано: {item['ad_date']}\n\n"
                                 f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
                             )
                             try:
@@ -400,4 +544,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-main.py
