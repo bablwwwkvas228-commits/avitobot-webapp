@@ -105,15 +105,15 @@
     <div class="subtitle">Выберите подходящий тариф для отслеживания объявлений</div>
 
     <div class="tariffs-container">
-        <div class="tariff-card selected" onclick="selectTariff(this, '7', 15)">
+        <div class="tariff-card selected" onclick="selectTariff(this, '2', 0, 'free')">
             <div class="tariff-info">
-                <h3>Неделя</h3>
-                <p>7 дней доступа</p>
+                <h3>Пробный</h3>
+                <p>2 дня бесплатно</p>
             </div>
-            <div class="tariff-price">⭐ 15</div>
+            <div class="tariff-price" style="color: #27ae60;">Бесплатно</div>
         </div>
 
-        <div class="tariff-card" onclick="selectTariff(this, '30', 45)">
+        <div class="tariff-card" onclick="selectTariff(this, '30', 45, 'pay')">
             <div class="tariff-info">
                 <h3>Месяц</h3>
                 <p>30 дней доступа</p>
@@ -121,7 +121,7 @@
             <div class="tariff-price">⭐ 45</div>
         </div>
 
-        <div class="tariff-card" onclick="selectTariff(this, '90', 120)">
+        <div class="tariff-card" onclick="selectTariff(this, '90', 120, 'pay')">
             <div class="tariff-info">
                 <h3>Квартал</h3>
                 <p>90 дней доступа (выгода)</p>
@@ -130,29 +130,42 @@
         </div>
     </div>
 
-    <button class="buy-btn" id="payButton" onclick="buySubscription()">Купить за ⭐ 15</button>
+    <button class="buy-btn" id="payButton" onclick="buySubscription()">Активировать бесплатно</button>
 
-   <script>
+    <script>
         let tg = window.Telegram.WebApp;
         tg.expand();
 
-        // ВПИШИТЕ СЮДА ЮЗЕРНЕЙМ ВАШЕГО БОТА БЕЗ СОБАЧКИ @ (например: "my_avito_parser_bot")
-        const BOT_USERNAME = "@Parrrs3r_Bot";
+        // Вставьте юзернейм вашего бота БЕЗ собачки @
+        const BOT_USERNAME = "Parrrs3r_Bot";
 
-        let selectedDays = '7';
-        let selectedStars = 15;
+        let selectedDays = '2';
+        let selectedStars = 0;
+        let tariffType = 'free';
 
-        function selectTariff(element, days, stars) {
+        function selectTariff(element, days, stars, type) {
             document.querySelectorAll('.tariff-card').forEach(card => card.classList.remove('selected'));
             element.classList.add('selected');
             selectedDays = days;
             selectedStars = stars;
-            document.getElementById('payButton').innerText = `Купить за ⭐ ${stars}`;
+            tariffType = type;
+
+            const btn = document.getElementById('payButton');
+            if (type === 'free') {
+                btn.innerText = 'Активировать бесплатно';
+            } else {
+                btn.innerText = `Купить за ⭐ ${stars}`;
+            }
         }
 
         function buySubscription() {
-            // Передаем выбранный тариф прямо в команду /start бота и закрываем окно Mini App
-            tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=buy_${selectedDays}_${selectedStars}`);
+            if (tariffType === 'free') {
+                // Если выбран бесплатный тариф — переходим в бот для активации пробного периода
+                tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=free_${selectedDays}`);
+            } else {
+                // Если платный — отправляем запрос на счет в бот
+                tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=buy_${selectedDays}_${selectedStars}`);
+            }
             tg.close();
         }
     </script>
