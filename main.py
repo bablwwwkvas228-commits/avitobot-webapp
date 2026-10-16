@@ -90,6 +90,7 @@ def parse_avito_date(date_str: str) -> str:
     if not date_str:
         return "Неизвестно"
         
+    # Строго задаем московское время (UTC+3)
     tz_moscow = timezone(timedelta(hours=3))
     now = datetime.now(tz_moscow)
     date_str = date_str.lower().strip()
@@ -102,7 +103,7 @@ def parse_avito_date(date_str: str) -> str:
         if match_min:
             dt = now - timedelta(minutes=int(match_min.group(1)))
             return dt.strftime("%d.%m.%Y %H:%M")
-        if "минуту назад" in date_str:
+        if "минуту назад" in date_str or "минуту назад" in date_str:
             dt = now - timedelta(minutes=1)
             return dt.strftime("%d.%m.%Y %H:%M")
 
@@ -116,12 +117,12 @@ def parse_avito_date(date_str: str) -> str:
 
         match_today = re.search(r'сегодня\s*(?:в)?\s*(\d{1,2}):(\d{2})', date_str)
         if match_today:
-            dt = now.replace(hour=int(match_today.group(1)), minute=int(match_today.group(2)))
+            dt = now.replace(hour=int(match_today.group(1)), minute=int(match_today.group(2)), second=0, microsecond=0)
             return dt.strftime("%d.%m.%Y %H:%M")
 
         match_yesterday = re.search(r'вчера\s*(?:в)?\s*(\d{1,2}):(\d{2})', date_str)
         if match_yesterday:
-            dt = (now - timedelta(days=1)).replace(hour=int(match_yesterday.group(1)), minute=int(match_yesterday.group(2)))
+            dt = (now - timedelta(days=1)).replace(hour=int(match_yesterday.group(1)), minute=int(match_yesterday.group(2)), second=0, microsecond=0)
             return dt.strftime("%d.%m.%Y %H:%M")
 
         return date_str.capitalize()
@@ -377,7 +378,7 @@ async def monitor_task():
                                 f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
                                 f"🌍 {item['location']}\n"
                                 f"📊 {stats_text}\n\n"
-                                f"🕒 Опубликовано: {item['ad_date']} (Бот нашел: {current_time})\n\n"
+                                f"🕒 Опубликовано: {item['ad_date']}\n\n"
                                 f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
                             )
                             try:
