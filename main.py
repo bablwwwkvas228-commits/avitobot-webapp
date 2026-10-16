@@ -277,18 +277,40 @@ class SearchForm(StatesGroup):
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# 1. Теперь кнопка "💎 Подписка / Тарифы" обычная (без WebAppInfo)
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="➕ Добавить поиск"), KeyboardButton(text="📋 Мои поиски")],
-        [KeyboardButton(text="💎 Подписка / Тарифы", web_app=WebAppInfo(url=MINI_APP_URL))]
+        [KeyboardButton(text="💎 Подписка / Тарифы")]
     ],
     resize_keyboard=True,
     input_field_placeholder="Выберите действие..."
 )
 
+# 2. Обновленный /start (принимает запрос на покупку из кнопки меню @BotFather)
 @dp.message(CommandStart())
 async def cmd_start(msg: Message):
     register_user(msg.from_user.id, msg.from_user.username)
+    
+    # Проверяем, пришел ли пользователь из кнопки "Купить" в Mini App
+    args = msg.text.split()
+    if len(args) > 1 and args[1].startswith("buy_"):
+        try:
+            _, days_str, stars_str = args[1].split("_")
+            days, stars = int(days_str), int(stars_str)
+            prices = [LabeledPrice(label=f"Подписка на {days} дней", amount=stars)]
+            await bot.send_invoice(
+                chat_id=msg.from_user.id,
+                title=f"Подписка на Авито Менеджер ({days} дн.)",
+                description=f"Активация доступа к мониторингу объявлений на {days} дней.",
+                payload=f"sub_{days}_days",
+                currency="XTR",
+                prices=prices
+            )
+            return
+        except Exception as e:
+            logging.error(f"Ошибка выставления счета через start: {e}")
+
     is_active, sub_text = check_subscription(msg.from_user.id)
     status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
     
@@ -301,6 +323,16 @@ async def cmd_start(msg: Message):
         parse_mode="HTML"
     )
 
+# 3. Обработчик обычной кнопки "💎 Подписка / Тарифы"
+@dp.message(F.text == "💎 Подписка / Тарифы")
+async def btn_sub_info(msg: Message):
+    is_active, sub_text = check_subscription(msg.from_user.id)
+    status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
+    await msg.answer(
+        f"💎 <b>Статус вашей подписки:</b> {status_emoji}\n\n"
+        f"Для выбора тарифа и оплаты нажмите на синюю кнопку <b>меню (слева от поля ввода сообщения)</b> 👇",
+        parse_mode="HTML"
+    )
 @dp.message(Command("give_sub"))
 async def cmd_give_sub(msg: Message):
     parts = msg.text.split()
