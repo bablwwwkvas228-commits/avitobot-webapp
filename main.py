@@ -292,24 +292,40 @@ main_keyboard = ReplyKeyboardMarkup(
 async def cmd_start(msg: Message):
     register_user(msg.from_user.id, msg.from_user.username)
     
-    # Проверяем, пришел ли пользователь из кнопки "Купить" в Mini App
     args = msg.text.split()
-    if len(args) > 1 and args[1].startswith("buy_"):
-        try:
-            _, days_str, stars_str = args[1].split("_")
-            days, stars = int(days_str), int(stars_str)
-            prices = [LabeledPrice(label=f"Подписка на {days} дней", amount=stars)]
-            await bot.send_invoice(
-                chat_id=msg.from_user.id,
-                title=f"Подписка на Авито Менеджер ({days} дн.)",
-                description=f"Активация доступа к мониторингу объявлений на {days} дней.",
-                payload=f"sub_{days}_days",
-                currency="XTR",
-                prices=prices
-            )
-            return
-        except Exception as e:
-            logging.error(f"Ошибка выставления счета через start: {e}")
+    if len(args) > 1:
+        # Обработка бесплатного пробного тарифа
+        if args[1].startswith("free_"):
+            try:
+                days = int(args[1].split("_")[1])
+                until_str = set_subscription(msg.from_user.id, days, plan="trial")
+                await msg.answer(
+                    f"🎉 <b>Пробный период активирован!</b>\n"
+                    f"Вам добавлено <b>{days} дня(дней)</b> бесплатного доступа.\n"
+                    f"Действует до: <b>{until_str} МСК</b> 🚀",
+                    parse_mode="HTML"
+                )
+                return
+            except Exception as e:
+                logging.error(f"Ошибка активации бесплатного тарифа: {e}")
+                
+        # Обработка платного тарифа через Stars
+        elif args[1].startswith("buy_"):
+            try:
+                _, days_str, stars_str = args[1].split("_")
+                days, stars = int(days_str), int(stars_str)
+                prices = [LabeledPrice(label=f"Подписка на {days} дней", amount=stars)]
+                await bot.send_invoice(
+                    chat_id=msg.from_user.id,
+                    title=f"Подписка на Авито Менеджер ({days} дн.)",
+                    description=f"Активация доступа к мониторингу объявлений на {days} дней.",
+                    payload=f"sub_{days}_days",
+                    currency="XTR",
+                    prices=prices
+                )
+                return
+            except Exception as e:
+                logging.error(f"Ошибка выставления счета через start: {e}")
 
     is_active, sub_text = check_subscription(msg.from_user.id)
     status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
