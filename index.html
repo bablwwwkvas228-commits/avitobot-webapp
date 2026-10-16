@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Подписка на Авито Менеджер</title>
+    <title>Подписка FlipRadar</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         :root {
@@ -35,7 +35,35 @@
             color: var(--hint-color);
             font-size: 14px;
             text-align: center;
-            margin-bottom: 24px;
+            margin-bottom: 20px;
+        }
+
+        /* Переключатель категорий (Start / Pro) */
+        .tabs {
+            display: flex;
+            width: 100%;
+            max-width: 400px;
+            background-color: var(--card-bg);
+            border-radius: 10px;
+            padding: 4px;
+            margin-bottom: 16px;
+        }
+
+        .tab {
+            flex: 1;
+            text-align: center;
+            padding: 10px;
+            font-weight: bold;
+            font-size: 14px;
+            cursor: pointer;
+            border-radius: 8px;
+            transition: all 0.2s ease;
+            color: var(--hint-color);
+        }
+
+        .tab.active {
+            background-color: var(--button-color);
+            color: var(--button-text-color);
         }
 
         .tariffs-container {
@@ -69,14 +97,17 @@
 
         .tariff-info p {
             margin: 0;
-            font-size: 13px;
+            font-size: 12px;
             color: var(--hint-color);
+            line-height: 1.4;
         }
 
         .tariff-price {
             font-weight: bold;
             font-size: 16px;
             color: var(--button-color);
+            white-space: nowrap;
+            margin-left: 10px;
         }
 
         .buy-btn {
@@ -90,7 +121,7 @@
             font-size: 16px;
             font-weight: bold;
             cursor: pointer;
-            margin-top: 24px;
+            margin-top: 20px;
             text-align: center;
         }
 
@@ -101,44 +132,20 @@
 </head>
 <body>
 
-    <h2>💎 Выбор подписки</h2>
-    <div class="subtitle">Выберите подходящий тариф для отслеживания объявлений</div>
+    <h2>⚡ FlipRadar Тарифы</h2>
+    <div class="subtitle">Выберите уровень и срок подписки</div>
 
-    <div class="tariffs-container">
-        <div class="tariff-card selected" onclick="selectTariff(this, '2', 0, 'free')">
-            <div class="tariff-info">
-                <h3>Пробный</h3>
-                <p>2 дня • <b>2 поиска</b> с Авито</p>
-            </div>
-            <div class="tariff-price" style="color: #27ae60;">Бесплатно</div>
-        </div>
-
-        <div class="tariff-card" onclick="selectTariff(this, '30', 100, 'pay')">
-            <div class="tariff-info">
-                <h3>Месяц</h3>
-                <p>30 дней • <b>5 поисков</b> с Авито</p>
-            </div>
-            <div class="tariff-price">⭐ 100</div>
-        </div>
-
-        <div class="tariff-card" onclick="selectTariff(this, '90', 200, 'pay')">
-            <div class="tariff-info">
-                <h3>3 месяца</h3>
-                <p>90 дней • <b>15 поисков</b> с Авито</p>
-            </div>
-            <div class="tariff-price">⭐ 200</div>
-        </div>
-
-        <div class="tariff-card" onclick="selectTariff(this, '270', 500, 'pay')">
-            <div class="tariff-info">
-                <h3>9 месяцев</h3>
-                <p>270 дней • <b>15 поисков</b> с Авито</p>
-            </div>
-            <div class="tariff-price">⭐ 500</div>
-        </div>
+    <!-- Вкладки выбора линейки -->
+    <div class="tabs">
+        <div class="tab active" id="tabStart" onclick="switchCategory('start')">Start (Базовый)</div>
+        <div class="tab" id="tabPro" onclick="switchCategory('pro')">Pro (Всё включено)</div>
     </div>
 
-    <button class="buy-btn" id="payButton" onclick="buySubscription()">Активировать бесплатно</button>
+    <div class="tariffs-container" id="tariffsList">
+        <!-- Контент генерируется скриптом ниже -->
+    </div>
+
+    <button class="buy-btn" id="payButton" onclick="buySubscription()">Купить подписку</button>
 
     <script>
         let tg = window.Telegram.WebApp;
@@ -146,33 +153,81 @@
 
         const BOT_USERNAME = "Parrrs3r_Bot";
 
-        let selectedDays = '2';
-        let selectedStars = 0;
-        let tariffType = 'free';
+        // Данные по тарифам
+        const tariffsData = {
+            start: [
+                { days: '30', stars: '100', name: 'Start • 1 месяц', desc: 'Мониторинг, фильтры, до 3 поисков' },
+                { days: '90', stars: '250', name: 'Start • 3 месяца', desc: 'Мониторинг, фильтры, до 3 поисков (выгода)' },
+                { days: '270', stars: '600', name: 'Start • 9 месяцев', desc: 'Мониторинг, фильтры, до 3 поисков (максимум)' }
+            ],
+            pro: [
+                { days: '30', stars: '200', name: 'Pro • 1 месяц', desc: 'Мониторинг + Аналитика + Учёт сделок, до 15 поисков' },
+                { days: '90', stars: '500', name: 'Pro • 3 месяца', desc: 'Мониторинг + Аналитика + Учёт сделок, до 15 поисков' },
+                { days: '270', stars: '1200', name: 'Pro • 9 месяцев', desc: 'Мониторинг + Аналитика + Учёт сделок, до 15 поисков' }
+            ]
+        };
 
-        function selectTariff(element, days, stars, type) {
+        let currentCategory = 'start';
+        let selectedDays = '30';
+        let selectedStars = '100';
+        let selectedPlanName = 'Start • 1 месяц';
+
+        function switchCategory(category) {
+            currentCategory = category;
+            document.getElementById('tabStart').classList.toggle('active', category === 'start');
+            document.getElementById('tabPro').classList.toggle('active', category === 'pro');
+            renderTariffs();
+        }
+
+        function renderTariffs() {
+            const container = document.getElementById('tariffsList');
+            container.innerHTML = '';
+            
+            const list = tariffsData[currentCategory];
+            list.forEach((t, index) => {
+                const isSelected = (index === 0);
+                if (isSelected) {
+                    selectedDays = t.days;
+                    selectedStars = t.stars;
+                    selectedPlanName = t.name;
+                }
+
+                const card = document.createElement('div');
+                card.className = `tariff-card ${isSelected ? 'selected' : ''}`;
+                card.onclick = () => selectTariff(card, t.days, t.stars, t.name);
+                card.innerHTML = `
+                    <div class="tariff-info">
+                        <h3>${t.name}</h3>
+                        <p>${t.desc}</p>
+                    </div>
+                    <div class="tariff-price">⭐ ${t.stars}</div>
+                `;
+                container.appendChild(card);
+            });
+            updateButtonText();
+        }
+
+        function selectTariff(element, days, stars, name) {
             document.querySelectorAll('.tariff-card').forEach(card => card.classList.remove('selected'));
             element.classList.add('selected');
             selectedDays = days;
             selectedStars = stars;
-            tariffType = type;
+            selectedPlanName = name;
+            updateButtonText();
+        }
 
-            const btn = document.getElementById('payButton');
-            if (type === 'free') {
-                btn.innerText = 'Активировать бесплатно';
-            } else {
-                btn.innerText = `Купить за ⭐ ${stars}`;
-            }
+        function updateButtonText() {
+            document.getElementById('payButton').innerText = `Купить ${selectedPlanName} за ⭐ ${selectedStars}`;
         }
 
         function buySubscription() {
-            if (tariffType === 'free') {
-                tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=free_${selectedDays}`);
-            } else {
-                tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=buy_${selectedDays}_${selectedStars}`);
-            }
+            // Передаем план (start или pro), дни и звезды в бота
+            tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=buy_${currentCategory}_${selectedDays}_${selectedStars}`);
             tg.close();
         }
+
+        // Инициализация при загрузке
+        renderTariffs();
     </script>
 </body>
 </html>
