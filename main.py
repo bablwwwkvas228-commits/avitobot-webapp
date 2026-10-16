@@ -465,11 +465,19 @@ async def btn_sub_info(msg: Message):
     max_limit = get_user_search_limit(msg.from_user.id)
     user_searches_count = len([s for s in get_all_searches() if s[1] == msg.from_user.id])
     
+    plan_desc = (
+        "<b>📦 Уровень Start:</b> Мониторинг, фильтры (до 3 поисков)" 
+        if plan == "start" 
+        else "<b>🚀 Уровень Pro:</b> Мониторинг + Аналитика + Учёт сделок (до 15 поисков)"
+    )
+    
     await msg.answer(
+        f"🆔 Ваш ID: <code>{msg.from_user.id}</code>\n"
         f"💎 <b>Статус подписки:</b> {status_emoji}\n"
-        f"⭐️ Уровень тарифа: <b>{plan.upper()}</b>\n"
+        f"⭐️ Тариф: <b>{plan.upper()}</b>\n"
+        f"{plan_desc}\n"
         f"📊 Активных поисков: <b>{user_searches_count} из {max_limit}</b>\n\n"
-        f"Для выбора тарифа и оплаты нажмите на синюю 👇 кнопку <b>меню (слева от поля ввода)</b> ",
+        f"💡 Для смены тарифа или продления нажмите на синюю кнопку <b>меню (слева от поля ввода)</b> 👇",
         parse_mode="HTML"
     )
 
