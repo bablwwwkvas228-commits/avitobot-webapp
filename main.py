@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sqlite3
 import re
+import random
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
@@ -130,78 +131,89 @@ def parse_avito_date(date_str: str) -> str:
         logging.warning(f"Не удалось распарсить дату: {date_str} - {e}")
         return date_str.capitalize()
 
-async def fetch_ads_direct(search_url: str) -> list[dict]:
+async def fetch_ads_direct(session: AsyncSession, search_url: str) -> list[dict]:
     target_url = format_avito_url(search_url)
     results = []
 
+    # Оставляем только дополнительные заголовки, чтобы не перебивать маскировку chrome120
     headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Referer": "https://www.avito.ru/",
         "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     }
 
     try:
-        async with AsyncSession(impersonate="chrome120") as session:
+        resp = None
+        for attempt in range(2):
             resp = await session.get(target_url, headers=headers, timeout=20)
             
-            if resp.status_code != 200:
-                logging.warning(f"Статус страницы: {resp.status_code}")
-                return []
+            if resp.status_code == 200:
+                break
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-            cards = soup.select('div[data-marker="item"]')
+            logging.warning(f"Статус страницы: {resp.status_code} (попытка {attempt + 1})")
 
-            for card in cards:
-                item_id = card.get("data-item-id")
-                if not item_id:
-                    continue
+            # Если Авито выдал проверку 439, заходим на главную страницу для получения куки и пробуем еще раз
+            if resp.status_code in (439, 403, 429) and attempt == 0:
+                await asyncio.sleep(random.uniform(3.0, 6.0))
+                await session.get("https://www.avito.ru/", headers=headers, timeout=15)
+                await asyncio.sleep(random.uniform(2.0, 4.0))
+        
+        if not resp or resp.status_code != 200:
+            return []
 
-                title_elem = card.select_one('[data-marker="item-title"]')
-                title = title_elem.get_text(strip=True) if title_elem else "Без названия"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        cards = soup.select('div[data-marker="item"]')
 
-                raw_href = title_elem.get("href") if title_elem else ""
-                url = f"https://www.avito.ru{raw_href}" if raw_href.startswith("/") else raw_href
+        for card in cards:
+            item_id = card.get("data-item-id")
+            if not item_id:
+                continue
 
-                price_meta = card.select_one('meta[itemprop="price"]')
-                price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
+            title_elem = card.select_one('[data-marker="item-title"]')
+            title = title_elem.get_text(strip=True) if title_elem else "Без названия"
 
-                location = "Локация не указана"
-                geo_elem = (
-                    card.find(attrs={"data-marker": "item-address"}) or 
-                    card.select_one('[class*="geo-"]') or 
-                    card.select_one('[class*="address-"]') or
-                    card.select_one('[class*="location-"]')
-                )
-                if geo_elem:
-                    location = geo_elem.get_text(separator=" ", strip=True)
-                else:
-                    for span in card.find_all(['span', 'div']):
-                        txt = span.get_text(strip=True)
-                        if ("," in txt or "район" in txt.lower() or "область" in txt.lower()) and 3 < len(txt) < 40 and "₽" not in txt:
-                            location = txt
-                            break
+            raw_href = title_elem.get("href") if title_elem else ""
+            url = f"https://www.avito.ru{raw_href}" if raw_href.startswith("/") else raw_href
 
-                location = re.sub(r'\s+', ' ', location).strip()
+            price_meta = card.select_one('meta[itemprop="price"]')
+            price = int(price_meta.get("content", 0)) if price_meta and price_meta.get("content") else 0
 
-                date_elem = card.select_one('[data-marker="item-date"]')
-                raw_date = date_elem.get_text(strip=True) if date_elem else ""
-                ad_date = parse_avito_date(raw_date)
+            location = "Локация не указана"
+            geo_elem = (
+                card.find(attrs={"data-marker": "item-address"}) or 
+                card.select_one('[class*="geo-"]') or 
+                card.select_one('[class*="address-"]') or
+                card.select_one('[class*="location-"]')
+            )
+            if geo_elem:
+                location = geo_elem.get_text(separator=" ", strip=True)
+            else:
+                for span in card.find_all(['span', 'div']):
+                    txt = span.get_text(strip=True)
+                    if ("," in txt or "район" in txt.lower() or "область" in txt.lower()) and 3 < len(txt) < 40 and "₽" not in txt:
+                        location = txt
+                        break
 
-                results.append({
-                    "id": item_id,
-                    "title": title,
-                    "price": price,
-                    "url": url,
-                    "location": location,
-                    "ad_date": ad_date
-                })
+            location = re.sub(r'\s+', ' ', location).strip()
+
+            date_elem = card.select_one('[data-marker="item-date"]')
+            raw_date = date_elem.get_text(strip=True) if date_elem else ""
+            ad_date = parse_avito_date(raw_date)
+
+            results.append({
+                "id": item_id,
+                "title": title,
+                "price": price,
+                "url": url,
+                "location": location,
+                "ad_date": ad_date
+            })
 
     except Exception as e:
         logging.error(f"Ошибка запроса: {e}")
+
+    return results
 
     return results
 
@@ -337,62 +349,69 @@ async def delete_callback(callback: CallbackQuery):
 
 # ================= 6. ФОНОВЫЙ МОНИТОРИНГ =================
 async def monitor_task():
-    while True:
+    async with AsyncSession(impersonate="chrome120") as session:
+        # Первичный заход на главную Авито при старте бота для получения куки
         try:
-            searches = get_all_searches()
-            for s_id, user_id, url, max_price in searches:
-                items = await fetch_ads_direct(url)
-                
-                if not items:
-                    continue
+            await session.get("https://www.avito.ru/", timeout=15)
+        except Exception:
+            pass
 
-                for item in items:
-                    item_id = item["id"]
+        while True:
+            try:
+                searches = get_all_searches()
+                for s_id, user_id, url, max_price in searches:
+                    items = await fetch_ads_direct(session, url)
+                    
+                    if not items:
+                        await asyncio.sleep(random.uniform(5.0, 9.0))
+                        continue
 
-                    if not is_item_seen(item_id):
-                        mark_item_as_seen(item_id)
+                    for item in items:
+                        item_id = item["id"]
 
-                        if 0 < item["price"] <= max_price:
-                            avg_price = get_model_average(item["title"], items)
-                            
-                            stats_text = ""
-                            if avg_price > 0:
-                                diff = item["price"] - avg_price
-                                percent = abs(int((diff / avg_price) * 100))
-                                if diff < 0:
-                                    stats_text = f"📉 На {percent}% ниже рынка ({avg_price:,} ₽)"
-                                elif diff > 0:
-                                    stats_text = f"📈 На {percent}% выше рынка ({avg_price:,} ₽)"
+                        if not is_item_seen(item_id):
+                            mark_item_as_seen(item_id)
+
+                            if 0 < item["price"] <= max_price:
+                                avg_price = get_model_average(item["title"], items)
+                                
+                                stats_text = ""
+                                if avg_price > 0:
+                                    diff = item["price"] - avg_price
+                                    percent = abs(int((diff / avg_price) * 100))
+                                    if diff < 0:
+                                        stats_text = f"📉 На {percent}% ниже рынка ({avg_price:,} ₽)"
+                                    elif diff > 0:
+                                        stats_text = f"📈 На {percent}% выше рынка ({avg_price:,} ₽)"
+                                    else:
+                                        stats_text = f"⚖️ Равна средней цене ({avg_price:,} ₽)"
                                 else:
-                                    stats_text = f"⚖️ Равна средней цене ({avg_price:,} ₽)"
-                            else:
-                                stats_text = "🤷‍♂️ Нет данных для сравнения точной модели"
+                                    stats_text = "🤷‍♂️ Нет данных для сравнения точной модели"
 
-                            tz_moscow = timezone(timedelta(hours=3))
-                            current_time = datetime.now(tz_moscow).strftime("%H:%M")
+                                safe_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
+                                
+                                text = (
+                                    f"📌 <b>{safe_title}</b>\n"
+                                    f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
+                                    f"🌍 {item['location']}\n"
+                                    f"📊 {stats_text}\n\n"
+                                    f"🕒 Опубликовано: {item['ad_date']}\n\n"
+                                    f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
+                                )
+                                try:
+                                    await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                                except Exception as err:
+                                    logging.error(f"Ошибка отправки сообщения: {err}")
 
-                            safe_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
-                            
-                            text = (
-                                f"📌 <b>{safe_title}</b>\n"
-                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
-                                f"🌍 {item['location']}\n"
-                                f"📊 {stats_text}\n\n"
-                                f"🕒 Опубликовано: {item['ad_date']}\n\n"
-                                f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
-                            )
-                            try:
-                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
-                            except Exception as err:
-                                logging.error(f"Ошибка отправки сообщения: {err}")
+                    # Случайная пауза между разными поисками (от 4 до 8 секунд)
+                    await asyncio.sleep(random.uniform(4.0, 8.0))
 
-                await asyncio.sleep(4)
+            except Exception as e:
+                logging.error(f"Ошибка в цикле мониторинга: {e}")
 
-        except Exception as e:
-            logging.error(f"Ошибка в цикле мониторинга: {e}")
-
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
-
+            # Случайная пауза между циклами проверки (от 40 до 65 секунд)
+            await asyncio.sleep(random.uniform(CHECK_INTERVAL_SECONDS, CHECK_INTERVAL_SECONDS + 25))
+            
 # ================= 7. ТОЧКА ВХОДА =================
 async def main():
     init_db()
