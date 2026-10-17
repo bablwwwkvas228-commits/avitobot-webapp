@@ -144,15 +144,16 @@ def check_subscription(user_id: int) -> tuple[bool, str, str]:
     except Exception:
         return False, "Не активна", "start"
 
-def get_user_search_limit(user_id: int) -> int:
+def get_user_search_limit(user_id: int) -> tuple[int, str]:
+    """Возвращает лимит поисков и текущий уровень тарифа пользователя"""
     is_active, _, plan = check_subscription(user_id)
     if not is_active:
-        return 0
+        return 0, "free"
     
     # Лимиты: для Start — до 3 поисков, для Pro — до 15 поисков
     if plan == "pro":
-        return 15
-    return 3
+        return 15, "pro"
+    return 3, "start"
 
 def add_search(user_id: int, url: str, max_price: int):
     conn = sqlite3.connect(DB_PATH)
@@ -396,20 +397,23 @@ async def successful_payment_handler(msg: Message):
 
 @dp.message(F.text == "➕ Добавить поиск")
 async def btn_add(msg: Message, state: FSMContext):
-    is_active, _, _ = check_subscription(msg.from_user.id)
+    is_active, _, plan = check_subscription(msg.from_user.id)
     if not is_active:
         await msg.answer("⛔️ У вас истекла подписка. Откройте меню Mini App для выбора тарифа и продления!")
         return
 
-    # Проверяем лимит поисков по текущему тарифу
     user_searches = [s for s in get_all_searches() if s[1] == msg.from_user.id]
-    max_limit = get_user_search_limit(msg.from_user.id)
+    max_limit, plan_name = get_user_search_limit(msg.from_user.id)
     
     if len(user_searches) >= max_limit:
+        upgrade_text = (
+            " Перейдите на тариф <b>Pro</b> в меню подписок, чтобы увеличить лимит до 15 поисков и разблокировать аналитику!" 
+            if plan_name == "start" 
+            else ""
+        )
         await msg.answer(
             f"⚠️ <b>Достигнут лимит поисков!</b>\n"
-            f"Ваш тариф позволяет иметь не более <b>{max_limit}</b> активных поисков.\n"
-            f"Удалите старые поиски во вкладке «📋 Мои поиски» или перейдите на тариф Pro с лимитом до 15 поисков.",
+            f"Ваш тариф <b>{plan_name.upper()}</b> позволяет иметь не более <b>{max_limit}</b> активных поисков.{upgrade_text}",
             parse_mode="HTML"
         )
         return
