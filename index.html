@@ -268,11 +268,21 @@
             tg.close();
         }
 
-        function buyWithCard() {
+       function buyWithCard() {
             let userId = tg.initDataUnsafe?.user?.id || "Не определен";
             let messageText = `Здравствуйте! Хочу оплатить тариф ${selectedPlanName} (${selectedRubles}) через СБП / Карту.\nМой Telegram ID: ${userId}`;
             let encodedText = encodeURIComponent(messageText);
-            tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?text=${encodedText}`);
+            
+            // Формируем стандартную ссылку на чат с предзаполненным текстом
+            let url = `https://t.me/${BOT_USERNAME}?text=${encodedText}`;
+            
+            // Пробуем открыть через стандартный метод Telegram WebApp, либо через новое окно браузера
+            if (tg.openLink) {
+                tg.openLink(url);
+            } else {
+                window.open(url, '_blank');
+            }
+            
             tg.close();
         }
 
