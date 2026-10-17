@@ -279,36 +279,52 @@ def parse_avito_date(date_str: str) -> str:
         
     tz_moscow = timezone(timedelta(hours=3))
     now = datetime.now(tz_moscow)
-    date_str = date_str.lower().strip()
+    
+    # Заменяем неразрывные пробелы Авито на обычные
+    clean_str = date_str.replace('\xa0', ' ').lower().strip()
 
     try:
-        if "только что" in date_str:
-            return now.strftime("%d.%m.%Y %H:%M")
-        match_min = re.search(r'(\d+)\s*минут', date_str)
+        # 1. "только что" или "несколько секунд назад"
+        if "только что" in clean_str or "секунд" in clean_str:
+            return now.strftime("%d.%m.%Y %H:%M (МСК)")
+            
+        # 2. "X минут назад" или "минуту назад"
+        match_min = re.search(r'(\d+)\s*минут', clean_str)
         if match_min:
             dt = now - timedelta(minutes=int(match_min.group(1)))
-            return dt.strftime("%d.%m.%Y %H:%M")
-        if "минуту назад" in date_str:
+            return dt.strftime("%d.%m.%Y %H:%M (МСК)")
+        if "минуту назад" in clean_str:
             dt = now - timedelta(minutes=1)
-            return dt.strftime("%d.%m.%Y %H:%M")
-        match_hour = re.search(r'(\d+)\s*час', date_str)
+            return dt.strftime("%d.%m.%Y %H:%M (МСК)")
+            
+        # 3. "X часов назад" или "час назад"
+        match_hour = re.search(r'(\d+)\s*час', clean_str)
         if match_hour:
             dt = now - timedelta(hours=int(match_hour.group(1)))
-            return dt.strftime("%d.%m.%Y %H:%M")
-        if "час назад" in date_str:
+            return dt.strftime("%d.%m.%Y %H:%M (МСК)")
+        if "час назад" in clean_str:
             dt = now - timedelta(hours=1)
-            return dt.strftime("%d.%m.%Y %H:%M")
-        match_today = re.search(r'сегодня\s*(?:в)?\s*(\d{1,2}):(\d{2})', date_str)
+            return dt.strftime("%d.%m.%Y %H:%M (МСК)")
+            
+        # 4. "сегодня в ЧЧ:ММ" (компенсируем часовой пояс сервера +1 час до МСК)
+        match_today = re.search(r'сегодня\s*(?:в)?\s*(\d{1,2}):(\d{2})', clean_str)
         if match_today:
             dt = now.replace(hour=int(match_today.group(1)), minute=int(match_today.group(2)), second=0, microsecond=0)
-            return dt.strftime("%d.%m.%Y %H:%M")
-        match_yesterday = re.search(r'вчера\s*(?:в)?\s*(\d{1,2}):(\d{2})', date_str)
+            # Если время от Авито отстает от МСК более чем на 45 минут (из-за часового пояса сервера), прибавляем 1 час
+            if (now - dt).total_seconds() > 2700:
+                dt += timedelta(hours=1)
+            return dt.strftime("%d.%m.%Y %H:%M (МСК)")
+            
+        # 5. "вчера в ЧЧ:ММ"
+        match_yesterday = re.search(r'вчера\s*(?:в)?\s*(\d{1,2}):(\d{2})', clean_str)
         if match_yesterday:
             dt = (now - timedelta(days=1)).replace(hour=int(match_yesterday.group(1)), minute=int(match_yesterday.group(2)), second=0, microsecond=0)
-            return dt.strftime("%d.%m.%Y %H:%M")
-        return date_str.capitalize()
+            return dt.strftime("%d.%m.%Y %H:%M (МСК)")
+            
+        # Если Авито вернуло просто дату ("17 октября 21:37"), возвращаем текущее время обнаружения
+        return f"{date_str.capitalize()} (обнаружено в {now.strftime('%H:%M МСК')})"
     except Exception:
-        return date_str.capitalize()
+        return now.strftime("%d.%m.%Y %H:%M (МСК)")
 
 async def fetch_ads_direct(search_url: str) -> list[dict]:
     target_url = format_avito_url(search_url)
