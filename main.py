@@ -41,15 +41,14 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             sub_until TEXT,
-            plan TEXT DEFAULT 'free'
+            plan TEXT DEFAULT 'start'
         )
     """)
     
-    # Проверяем наличие колонки plan, если таблица старая
     cursor.execute("PRAGMA table_info(users)")
     user_columns = [col[1] for col in cursor.fetchall()]
     if "plan" not in user_columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN plan TEXT DEFAULT 'free'")
+        cursor.execute("ALTER TABLE users ADD COLUMN plan TEXT DEFAULT 'start'")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS searches (
@@ -57,6 +56,19 @@ def init_db():
             user_id INTEGER,
             url TEXT,
             max_price INTEGER
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS deals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            title TEXT,
+            buy_price INTEGER,
+            repair_cost INTEGER,
+            sell_price INTEGER,
+            profit INTEGER,
+            created_at TEXT
         )
     """)
     
@@ -145,12 +157,10 @@ def check_subscription(user_id: int) -> tuple[bool, str, str]:
         return False, "Не активна", "start"
 
 def get_user_search_limit(user_id: int) -> tuple[int, str]:
-    """Возвращает лимит поисков и текущий уровень тарифа пользователя"""
     is_active, _, plan = check_subscription(user_id)
     if not is_active:
         return 0, "free"
     
-    # Лимиты: для Start — до 3 поисков, для Pro — до 15 поисков
     if plan == "pro":
         return 15, "pro"
     return 3, "start"
@@ -177,6 +187,34 @@ def delete_search(search_id: int):
     cursor.execute("DELETE FROM seen_items WHERE search_id = ?", (search_id,))
     conn.commit()
     conn.close()
+
+def add_deal(user_id: int, title: str, buy_price: int, repair_cost: int, sell_price: int):
+    profit = sell_price - (buy_price + repair_cost)
+    tz_moscow = timezone(timedelta(hours=3))
+    date_str = datetime.now(tz_moscow).strftime("%d.%m.%Y")
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO deals (user_id, title, buy_price, repair_cost, sell_price, profit, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, title, buy_price, repair_cost, sell_price, profit, date_str))
+    conn.commit()
+    conn.close()
+
+def get_user_deals(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, buy_price, repair_cost, sell_price, profit, created_at FROM deals WHERE user_id = ? ORDER BY id DESC", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def get_user_financial_stats(user_id: int):
+    deals = get_user_deals(user_id)
+    total_profit = sum(d[5] for d in deals)
+    total_deals = len(deals)
+    return total_deals, total_profit
 
 def is_item_seen(search_id: int, item_id: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
@@ -290,12 +328,19 @@ class SearchForm(StatesGroup):
     waiting_for_url = State()
     waiting_for_price = State()
 
+class DealForm(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_buy_price = State()
+    waiting_for_repair_cost = State()
+    waiting_for_sell_price = State()
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="➕ Добавить поиск"), KeyboardButton(text="📋 Мои поиски")],
+        [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="➕ Добавить сделку")],
         [KeyboardButton(text="💎 Подписка / Тарифы")]
     ],
     resize_keyboard=True,
@@ -308,7 +353,6 @@ async def cmd_start(msg: Message):
     
     args = msg.text.split()
     if len(args) > 1:
-        # Бесплатный пробный период (2 дня, тариф Start)
         if args[1].startswith("free_"):
             try:
                 days = int(args[1].split("_")[1])
@@ -323,10 +367,8 @@ async def cmd_start(msg: Message):
             except Exception as e:
                 logging.error(f"Ошибка активации пробного периода: {e}")
                 
-        # Покупка платных тарифов через Stars (start или pro)
         elif args[1].startswith("buy_"):
             try:
-                # Формат: buy_start_30_100 или buy_pro_30_200
                 _, plan_type, days_str, stars_str = args[1].split("_")
                 days, stars = int(days_str), int(stars_str)
                 
@@ -346,12 +388,13 @@ async def cmd_start(msg: Message):
                 logging.error(f"Ошибка выставления счета: {e}")
 
     is_active, sub_text, plan = check_subscription(msg.from_user.id)
-    status_emoji = f"🟢 Активна до {sub_text} ({plan.upper()})" if is_active else f"🔴 {sub_text}"
+    status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
     
     await msg.answer(
         f"👋 <b>FlipRadar • Бот мониторинга и аналитики</b>\n\n"
         f"🆔 Ваш ID: <code>{msg.from_user.id}</code>\n"
-        f"💎 Подписка: <b>{status_emoji}</b>\n\n"
+        f"💎 Подписка: <b>{status_emoji}</b>\n"
+        f"⭐️ Тариф: <b>{plan.upper()}</b>\n\n"
         f"Используйте кнопки ниже для управления:",
         reply_markup=main_keyboard,
         parse_mode="HTML"
@@ -380,7 +423,6 @@ async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
 async def successful_payment_handler(msg: Message):
     payload = msg.successful_payment.invoice_payload
     if payload.startswith("sub_"):
-        # payload формат: sub_start_30 или sub_pro_30
         parts = payload.split("_")
         plan_type = parts[1]
         days = int(parts[2])
@@ -397,7 +439,7 @@ async def successful_payment_handler(msg: Message):
 
 @dp.message(F.text == "➕ Добавить поиск")
 async def btn_add(msg: Message, state: FSMContext):
-    is_active, _, plan = check_subscription(msg.from_user.id)
+    is_active, _, _ = check_subscription(msg.from_user.id)
     if not is_active:
         await msg.answer("⛔️ У вас истекла подписка. Откройте меню Mini App для выбора тарифа и продления!")
         return
@@ -446,7 +488,7 @@ async def process_price(msg: Message, state: FSMContext):
 @dp.message(F.text == "📋 Мои поиски")
 async def btn_list(msg: Message):
     searches = [s for s in get_all_searches() if s[1] == msg.from_user.id]
-    max_limit = get_user_search_limit(msg.from_user.id)
+    max_limit, _ = get_user_search_limit(msg.from_user.id)
     if not searches:
         await msg.answer(f"У вас нет активных поисков (лимит: 0/{max_limit}).")
         return
@@ -462,23 +504,108 @@ async def delete_callback(callback: CallbackQuery):
     await callback.message.edit_text("❌ Поиск удален.")
     await callback.answer()
 
+# Учет сделок (Pro)
+@dp.message(F.text == "➕ Добавить сделку")
+async def btn_add_deal(msg: Message, state: FSMContext):
+    is_active, _, plan = check_subscription(msg.from_user.id)
+    if not is_active or plan != "pro":
+        await msg.answer("🔒 Учет сделок и продвинутая аналитика доступны только на тарифе <b>PRO</b>. Перейдите в меню подписок для обновления!", parse_mode="HTML")
+        return
+
+    await msg.answer("📦 Введите <b>название товара</b> (например, <i>iPhone 14 Pro 128GB</i>):", parse_mode="HTML")
+    await state.set_state(DealForm.waiting_for_title)
+
+@dp.message(DealForm.waiting_for_title)
+async def process_deal_title(msg: Message, state: FSMContext):
+    await state.update_data(title=msg.text.strip())
+    await msg.answer("💰 Введите <b>цену покупки</b> (в рублях):", parse_mode="HTML")
+    await state.set_state(DealForm.waiting_for_buy_price)
+
+@dp.message(DealForm.waiting_for_buy_price)
+async def process_deal_buy(msg: Message, state: FSMContext):
+    digits = re.sub(r"\D", "", msg.text)
+    if not digits:
+        await msg.answer("Введите число:")
+        return
+    await state.update_data(buy_price=int(digits))
+    await msg.answer("🛠 Введите <b>расходы на ремонт / доставку</b> (в рублях, если расходов не было — введите 0):", parse_mode="HTML")
+    await state.set_state(DealForm.waiting_for_repair_cost)
+
+@dp.message(DealForm.waiting_for_repair_cost)
+async def process_deal_repair(msg: Message, state: FSMContext):
+    digits = re.sub(r"\D", "", msg.text)
+    if not digits:
+        await msg.answer("Введите число:")
+        return
+    await state.update_data(repair_cost=int(digits))
+    await msg.answer("🏷 Введите <b>плановую или реальную цену продажи</b> (в рублях):", parse_mode="HTML")
+    await state.set_state(DealForm.waiting_for_sell_price)
+
+@dp.message(DealForm.waiting_for_sell_price)
+async def process_deal_sell(msg: Message, state: FSMContext):
+    digits = re.sub(r"\D", "", msg.text)
+    if not digits:
+        await msg.answer("Введите число:")
+        return
+    sell_price = int(digits)
+    data = await state.get_data()
+    
+    add_deal(msg.from_user.id, data["title"], data["buy_price"], data["repair_cost"], sell_price)
+    await state.clear()
+    
+    profit = sell_price - (data["buy_price"] + data["repair_cost"])
+    await msg.answer(
+        f"✅ <b>Сделка успешно сохранена!</b>\n"
+        f"📱 Товар: {data['title']}\n"
+        f"💵 Чистая прибыль: <b>{profit:,} ₽</b>",
+        reply_markup=main_keyboard,
+        parse_mode="HTML"
+    )
+
+@dp.message(F.text == "💼 Мои сделки")
+async def btn_my_deals(msg: Message):
+    is_active, _, plan = check_subscription(msg.from_user.id)
+    if not is_active or plan != "pro":
+        await msg.answer("🔒 Раздел учета сделок доступен только на тарифе <b>PRO</b>.", parse_mode="HTML")
+        return
+
+    deals = get_user_deals(msg.from_user.id)
+    total_deals, total_profit = get_user_financial_stats(msg.from_user.id)
+    
+    if not deals:
+        await msg.answer("💼 У вас пока нет сохраненных сделок. Нажмите «➕ Добавить сделку», чтобы записать первую!")
+        return
+
+    report = f"📊 <b>Ваша бизнес-статистика:</b>\n" \
+             f"• Всего сделок: <b>{total_deals}</b>\n" \
+             f"• Общая чистая прибыль: <b>{total_profit:,} ₽</b>\n\n" \
+             f"📜 <b>Последние сделки:</b>\n"
+    
+    for d_id, title, buy, repair, sell, profit, date in deals[:10]:
+        profit_emoji = "🟢" if profit >= 0 else "🔴"
+        report += f"\n🆔 #{d_id} • <b>{title}</b> ({date})\n" \
+                  f"   Покупка: {buy:,} ₽ | Расходы: {repair:,} ₽\n" \
+                  f"   Продажа: {sell:,} ₽ | Прибыль: {profit_emoji} <b>{profit:,} ₽</b>\n"
+
+    await msg.answer(report, parse_mode="HTML")
+
 @dp.message(F.text == "💎 Подписка / Тарифы")
 async def btn_sub_info(msg: Message):
     is_active, sub_text, plan = check_subscription(msg.from_user.id)
     status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
-    max_limit = get_user_search_limit(msg.from_user.id)
+    max_limit, _ = get_user_search_limit(msg.from_user.id)
     user_searches_count = len([s for s in get_all_searches() if s[1] == msg.from_user.id])
     
     plan_desc = (
-        "<b>📦 Уровень Start:</b> Мониторинг, фильтры (до 3 поисков)" 
+        "<b>📦 Тариф Start:</b> Мониторинг, фильтры (до 3 поисков)" 
         if plan == "start" 
-        else "<b>🚀 Уровень Pro:</b> Мониторинг + Аналитика + Учёт сделок (до 15 поисков)"
+        else "<b>🚀 Тариф Pro:</b> Мониторинг + Аналитика + Учёт сделок (до 15 поисков)"
     )
     
     await msg.answer(
         f"🆔 Ваш ID: <code>{msg.from_user.id}</code>\n"
         f"💎 <b>Статус подписки:</b> {status_emoji}\n"
-        f"⭐️ Тариф: <b>{plan.upper()}</b>\n"
+        f"⭐️ Уровень тарифа: <b>{plan.upper()}</b>\n"
         f"{plan_desc}\n"
         f"📊 Активных поисков: <b>{user_searches_count} из {max_limit}</b>\n\n"
         f"💡 Для смены тарифа или продления нажмите на синюю кнопку <b>меню (слева от поля ввода)</b> 👇",
@@ -500,11 +627,25 @@ async def monitor_task():
                         mark_item_as_seen(s_id, item["id"])
                         if 0 < item["price"] <= max_price:
                             safe_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
+                            
+                            # Автоматический аналитический расчет для пользователей с тарифом PRO
+                            _, _, plan = check_subscription(user_id)
+                            analytics_text = ""
+                            if plan == "pro":
+                                estimated_sell = int(item['price'] * 1.15)
+                                estimated_profit = estimated_sell - item['price']
+                                analytics_text = (
+                                    f"\n📈 <b>FlipRadar Analytics (PRO):</b>\n"
+                                    f"• Плановая цена перепродажи: ~<b>{estimated_sell:,} ₽</b>\n"
+                                    f"• Ориентир прибыли: ~<b>{estimated_profit:,} ₽</b>\n"
+                                )
+
                             text = (
                                 f"📌 <b>{safe_title}</b>\n"
                                 f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
                                 f"🌍 {item['location']}\n"
-                                f"🕒 Опубликовано: {item['ad_date']}\n\n"
+                                f"🕒 Опубликовано: {item['ad_date']}"
+                                f"{analytics_text}\n"
                                 f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
                             )
                             try:
@@ -520,7 +661,7 @@ async def monitor_task():
 async def main():
     init_db()
     asyncio.create_task(monitor_task())
-    logging.info("FlipRadar запущен с поддержкой Start и Pro тарифов...")
+    logging.info("FlipRadar запущен с аналитикой и учетом сделок...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
