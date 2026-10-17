@@ -190,7 +190,7 @@
 
         const BOT_USERNAME = "Parrrs3r_Bot";
 
-        // Данные по тарифам (указаны рублевые эквиваленты для СБП и звезды для Telegram)
+        // Данные по тарифам
         const tariffsData = {
             start: [
                 { days: '30', stars: '100', rubles: '390 ₽', name: 'Start • 1 месяц', desc: 'Мониторинг, фильтры, до 3 поисков' },
@@ -260,24 +260,18 @@
         }
 
         function updateButtonsText() {
-            document.getElementById('payStarsBtn.innerText' = `Купить за ⭐ ${selectedStars}`);
+            document.getElementById('payStarsBtn').innerText = `Купить за ⭐ ${selectedStars}`;
         }
 
         function buyWithStars() {
-            // Передаем план, дни и звезды в бота для выставления счета через Telegram Stars
             tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=buy_${currentCategory}_${selectedDays}_${selectedStars}`);
             tg.close();
         }
 
         function buyWithCard() {
-            // Получаем ID пользователя из Telegram WebApp, если доступно
             let userId = tg.initDataUnsafe?.user?.id || "Не определен";
-            
-            // Формируем текст сообщения для перевода через СБП / карту
             let messageText = `Здравствуйте! Хочу оплатить тариф ${selectedPlanName} (${selectedRubles}) через СБП / Карту.\nМой Telegram ID: ${userId}`;
             let encodedText = encodeURIComponent(messageText);
-            
-            // Открываем чат с администратором/ботом с предзаполненным текстом
             tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?text=${encodedText}`);
             tg.close();
         }
