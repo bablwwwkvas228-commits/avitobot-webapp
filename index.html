@@ -104,29 +104,59 @@
 
         .tariff-price {
             font-weight: bold;
-            font-size: 16px;
+            font-size: 15px;
             color: var(--button-color);
             white-space: nowrap;
             margin-left: 10px;
+            text-align: right;
         }
 
-        .buy-btn {
+        .tariff-price span {
+            display: block;
+            font-size: 12px;
+            color: var(--hint-color);
+            font-weight: normal;
+        }
+
+        .buttons-group {
+            width: 100%;
+            max-width: 400px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .action-btn {
             background-color: var(--button-color);
             color: var(--button-text-color);
             border: none;
             border-radius: 10px;
             padding: 14px;
             width: 100%;
-            max-width: 400px;
-            font-size: 16px;
+            font-size: 15px;
             font-weight: bold;
             cursor: pointer;
-            margin-top: 20px;
             text-align: center;
+            text-decoration: none;
+            box-sizing: border-box;
         }
 
-        .buy-btn:active {
+        .action-btn.sbp {
+            background-color: #2ecc71; /* Зеленая кнопка для перевода на карту/СБП */
+        }
+
+        .action-btn:active {
             opacity: 0.8;
+        }
+
+        .footer-note {
+            text-align: center;
+            font-size: 12px;
+            color: var(--hint-color);
+            margin-top: 15px;
+            max-width: 400px;
+            line-height: 1.4;
         }
     </style>
 </head>
@@ -145,7 +175,14 @@
         <!-- Контент генерируется скриптом ниже -->
     </div>
 
-    <button class="buy-btn" id="payButton" onclick="buySubscription()">Купить подписку</button>
+    <div class="buttons-group">
+        <button class="action-btn" id="payStarsBtn" onclick="buyWithStars()">Купить за Telegram Stars ⭐️</button>
+        <button class="action-btn sbp" id="payCardBtn" onclick="buyWithCard()">💳 Оплатить картой / СБП (РФ)</button>
+    </div>
+
+    <div class="footer-note">
+        💡 При оплате через СБП или карту чат откроется автоматически, вам останется только отправить сообщение с реквизитами и вашим ID.
+    </div>
 
     <script>
         let tg = window.Telegram.WebApp;
@@ -153,23 +190,24 @@
 
         const BOT_USERNAME = "Parrrs3r_Bot";
 
-        // Данные по тарифам
+        // Данные по тарифам (указаны рублевые эквиваленты для СБП и звезды для Telegram)
         const tariffsData = {
             start: [
-                { days: '30', stars: '100', name: 'Start • 1 месяц', desc: 'Мониторинг, фильтры, до 3 поисков' },
-                { days: '90', stars: '250', name: 'Start • 3 месяца', desc: 'Мониторинг, фильтры, до 3 поисков (выгода)' },
-                { days: '270', stars: '600', name: 'Start • 9 месяцев', desc: 'Мониторинг, фильтры, до 3 поисков (максимум)' }
+                { days: '30', stars: '100', rubles: '390 ₽', name: 'Start • 1 месяц', desc: 'Мониторинг, фильтры, до 3 поисков' },
+                { days: '90', stars: '250', rubles: '990 ₽', name: 'Start • 3 месяца', desc: 'Мониторинг, фильтры, до 3 поисков (выгода)' },
+                { days: '270', stars: '600', rubles: '2 490 ₽', name: 'Start • 9 месяцев', desc: 'Мониторинг, фильтры, до 3 поисков (максимум)' }
             ],
             pro: [
-                { days: '30', stars: '200', name: 'Pro • 1 месяц', desc: 'Мониторинг + Аналитика + Учёт сделок, до 15 поисков' },
-                { days: '90', stars: '500', name: 'Pro • 3 месяца', desc: 'Мониторинг + Аналитика + Учёт сделок, до 15 поисков' },
-                { days: '270', stars: '1200', name: 'Pro • 9 месяцев', desc: 'Мониторинг + Аналитика + Учёт сделок, до 15 поисков' }
+                { days: '30', stars: '200', rubles: '790 ₽', name: 'Pro • 1 месяц', desc: 'Мониторинг + Аналитика + Учёт сделок, до 15 поисков' },
+                { days: '90', stars: '500', rubles: '1 990 ₽', name: 'Pro • 3 месяца', desc: 'Мониторинг + Аналитика + Учёт сделок, до 15 поисков' },
+                { days: '270', stars: '1200', rubles: '4 990 ₽', name: 'Pro • 9 месяцев', desc: 'Мониторинг + Аналитика + Учёт сделок, до 15 поисков' }
             ]
         };
 
         let currentCategory = 'start';
         let selectedDays = '30';
         let selectedStars = '100';
+        let selectedRubles = '390 ₽';
         let selectedPlanName = 'Start • 1 месяц';
 
         function switchCategory(category) {
@@ -189,40 +227,58 @@
                 if (isSelected) {
                     selectedDays = t.days;
                     selectedStars = t.stars;
+                    selectedRubles = t.rubles;
                     selectedPlanName = t.name;
                 }
 
                 const card = document.createElement('div');
                 card.className = `tariff-card ${isSelected ? 'selected' : ''}`;
-                card.onclick = () => selectTariff(card, t.days, t.stars, t.name);
+                card.onclick = () => selectTariff(card, t.days, t.stars, t.rubles, t.name);
                 card.innerHTML = `
                     <div class="tariff-info">
                         <h3>${t.name}</h3>
                         <p>${t.desc}</p>
                     </div>
-                    <div class="tariff-price">⭐ ${t.stars}</div>
+                    <div class="tariff-price">
+                        ⭐ ${t.stars}
+                        <span>${t.rubles}</span>
+                    </div>
                 `;
                 container.appendChild(card);
             });
-            updateButtonText();
+            updateButtonsText();
         }
 
-        function selectTariff(element, days, stars, name) {
+        function selectTariff(element, days, stars, rubles, name) {
             document.querySelectorAll('.tariff-card').forEach(card => card.classList.remove('selected'));
             element.classList.add('selected');
             selectedDays = days;
             selectedStars = stars;
+            selectedRubles = rubles;
             selectedPlanName = name;
-            updateButtonText();
+            updateButtonsText();
         }
 
-        function updateButtonText() {
-            document.getElementById('payButton').innerText = `Купить ${selectedPlanName} за ⭐ ${selectedStars}`;
+        function updateButtonsText() {
+            document.getElementById('payStarsBtn.innerText' = `Купить за ⭐ ${selectedStars}`);
         }
 
-        function buySubscription() {
-            // Передаем план (start или pro), дни и звезды в бота
+        function buyWithStars() {
+            // Передаем план, дни и звезды в бота для выставления счета через Telegram Stars
             tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=buy_${currentCategory}_${selectedDays}_${selectedStars}`);
+            tg.close();
+        }
+
+        function buyWithCard() {
+            // Получаем ID пользователя из Telegram WebApp, если доступно
+            let userId = tg.initDataUnsafe?.user?.id || "Не определен";
+            
+            // Формируем текст сообщения для перевода через СБП / карту
+            let messageText = `Здравствуйте! Хочу оплатить тариф ${selectedPlanName} (${selectedRubles}) через СБП / Карту.\nМой Telegram ID: ${userId}`;
+            let encodedText = encodeURIComponent(messageText);
+            
+            // Открываем чат с администратором/ботом с предзаполненным текстом
+            tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?text=${encodedText}`);
             tg.close();
         }
 
