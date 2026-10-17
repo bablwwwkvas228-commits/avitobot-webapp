@@ -664,4 +664,117 @@ async def process_edit_title(msg: Message, state: FSMContext):
 async def process_edit_buy(msg: Message, state: FSMContext):
     digits = re.sub(r"\D", "", msg.text)
     if not digits:
-        await msg.
+        await msg.answer("Введите число:")
+        return
+    await state.update_data(buy_price=int(digits))
+    await msg.answer("🛠 Введите <b>новые расходы на ремонт / доставку</b> (в рублях):", parse_mode="HTML")
+    await state.set_state(EditDealForm.waiting_for_repair_cost)
+
+@dp.message(EditDealForm.waiting_for_repair_cost)
+async def process_edit_repair(msg: Message, state: FSMContext):
+    digits = re.sub(r"\D", "", msg.text)
+    if not digits:
+        await msg.answer("Введите число:")
+        return
+    await state.update_data(repair_cost=int(digits))
+    await msg.answer("🏷 Введите <b>новую цену продажи</b> (в рублях):", parse_mode="HTML")
+    await state.set_state(EditDealForm.waiting_for_sell_price)
+
+@dp.message(EditDealForm.waiting_for_sell_price)
+async def process_edit_sell(msg: Message, state: FSMContext):
+    digits = re.sub(r"\D", "", msg.text)
+    if not digits:
+        await msg.answer("Введите число:")
+        return
+    sell_price = int(digits)
+    data = await state.get_data()
+    deal_id = data["editing_deal_id"]
+    
+    update_deal(deal_id, data["title"], data["buy_price"], data["repair_cost"], sell_price)
+    await state.clear()
+    
+    profit = sell_price - (data["buy_price"] + data["repair_cost"])
+    await msg.answer(
+        f"✅ <b>Сделка #{deal_id} успешно обновлена!</b>\n"
+        f"📱 Товар: {data['title']}\n"
+        f"💵 Новая чистая прибыль: <b>{profit:,} ₽</b>",
+        reply_markup=main_keyboard,
+        parse_mode="HTML"
+    )
+
+@dp.message(F.text == "💎 Подписка / Тарифы")
+async def btn_sub_info(msg: Message):
+    is_active, sub_text, plan = check_subscription(msg.from_user.id)
+    status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
+    max_limit, _ = get_user_search_limit(msg.from_user.id)
+    user_searches_count = len([s for s in get_all_searches() if s[1] == msg.from_user.id])
+    
+    plan_desc = (
+        "<b>📦 Тариф Start:</b> Мониторинг, фильтры (до 3 поисков)" 
+        if plan == "start" 
+        else "<b>🚀 Тариф Pro:</b> Мониторинг + Аналитика + Учёт сделок (до 15 поисков)"
+    )
+    
+    await msg.answer(
+        f"🆔 Ваш ID: <code>{msg.from_user.id}</code>\n"
+        f"💎 <b>Статус подписки:</b> {status_emoji}\n"
+        f"⭐️ Уровень тарифа: <b>{plan.upper()}</b>\n"
+        f"{plan_desc}\n"
+        f"📊 Активных поисков: <b>{user_searches_count} из {max_limit}</b>\n\n"
+        f"💡 Для смены тарифа или продления нажмите на синюю кнопку <b>меню (слева от поля ввода)</b> 👇",
+        parse_mode="HTML"
+    )
+
+# ================= 5. ФОНОВЫЙ МОНИТОРИНГ =================
+async def monitor_task():
+    while True:
+        try:
+            for s_id, user_id, url, max_price in get_all_searches():
+                is_active, _, _ = check_subscription(user_id)
+                if not is_active:
+                    continue
+
+                items = await fetch_ads_direct(url)
+                for item in items:
+                    if not is_item_seen(s_id, item["id"]):
+                        mark_item_as_seen(s_id, item["id"])
+                        if 0 < item["price"] <= max_price:
+                            safe_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
+                            
+                            _, _, plan = check_subscription(user_id)
+                            analytics_text = ""
+                            if plan == "pro":
+                                estimated_sell = int(item['price'] * 1.15)
+                                estimated_profit = estimated_sell - item['price']
+                                analytics_text = (
+                                    f"\n📈 <b>FlipRadar Analytics (PRO):</b>\n"
+                                    f"• Плановая цена перепродажи: ~<b>{estimated_sell:,} ₽</b>\n"
+                                    f"• Ориентир прибыли: ~<b>{estimated_profit:,} ₽</b>\n"
+                                )
+
+                            text = (
+                                f"📌 <b>{safe_title}</b>\n"
+                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
+                                f"🌍 {item['location']}\n"
+                                f"🕒 Опубликовано: {item['ad_date']}"
+                                f"{analytics_text}\n"
+                                f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
+                            )
+                            try:
+                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                            except Exception:
+                                pass
+                await asyncio.sleep(4)
+        except Exception as e:
+            logging.error(f"Ошибка мониторинга: {e}")
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+# ================= 6. ЗАПУСК =================
+async def main():
+    init_db()
+    asyncio.create_task(monitor_task())
+    logging.info("FlipRadar запущен с управлением сделками...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
