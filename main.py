@@ -769,6 +769,29 @@ async def monitor_task():
             logging.error(f"Ошибка мониторинга: {e}")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
+# --- УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ ЧЕРЕЗ TELEGRAM ---
+
+# 1. Скачать актуальную базу с хостинга (команда /get_db)
+@dp.message(Command("get_db"))
+async def cmd_get_db(msg: Message):
+    db_file_path = "data/bot_database.db"
+    if os.path.exists(db_file_path):
+        from aiogram.types import FSInputFile
+        document = FSInputFile(db_file_path)
+        await msg.answer_document(document, caption="📦 Вот актуальный файл базы данных с хостинга!")
+    else:
+        await msg.answer("❌ Файл базы данных еще не найден.")
+
+# 2. Загрузить измененную в DBeaver базу обратно на хостинг (просто отправьте файл боту)
+@dp.message(F.document)
+async def upload_db_handler(msg: Message):
+    if msg.document.file_name == "bot_database.db":
+        os.makedirs("data", exist_ok=True)
+        file = await msg.bot.get_file(msg.document.file_id)
+        await msg.bot.download_file(file.file_path, "data/bot_database.db")
+        await msg.answer("✅ База данных на хостинге успешно обновлена!")
+
+# ----------------------------------------------
 # ================= 6. ЗАПУСК =================
 async def main():
     init_db()
