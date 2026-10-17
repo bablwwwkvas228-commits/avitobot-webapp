@@ -210,6 +210,33 @@ def get_user_deals(user_id: int):
     conn.close()
     return rows
 
+def get_deal_by_id(deal_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, user_id, title, buy_price, repair_cost, sell_price, profit, created_at FROM deals WHERE id = ?", (deal_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def update_deal(deal_id: int, title: str, buy_price: int, repair_cost: int, sell_price: int):
+    profit = sell_price - (buy_price + repair_cost)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE deals 
+        SET title = ?, buy_price = ?, repair_cost = ?, sell_price = ?, profit = ?
+        WHERE id = ?
+    """, (title, buy_price, repair_cost, sell_price, profit, deal_id))
+    conn.commit()
+    conn.close()
+
+def delete_deal(deal_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM deals WHERE id = ?", (deal_id,))
+    conn.commit()
+    conn.close()
+
 def get_user_financial_stats(user_id: int):
     deals = get_user_deals(user_id)
     total_profit = sum(d[5] for d in deals)
@@ -329,6 +356,12 @@ class SearchForm(StatesGroup):
     waiting_for_price = State()
 
 class DealForm(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_buy_price = State()
+    waiting_for_repair_cost = State()
+    waiting_for_sell_price = State()
+
+class EditDealForm(StatesGroup):
     waiting_for_title = State()
     waiting_for_buy_price = State()
     waiting_for_repair_cost = State()
@@ -495,16 +528,16 @@ async def btn_list(msg: Message):
     
     await msg.answer(f"📋 Ваши активные поиски ({len(searches)} из {max_limit}):")
     for s_id, _, url, max_price in searches:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{s_id}")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_search_{s_id}")]])
         await msg.answer(f"🔍 Поиск #{s_id}\n💰 Лимит: до {max_price:,} ₽\n🔗 <a href='{url}'>Ссылка на Авито</a>", reply_markup=kb, parse_mode="HTML")
 
-@dp.callback_query(F.data.startswith("del_"))
-async def delete_callback(callback: CallbackQuery):
-    delete_search(int(callback.data.split("_")[1]))
+@dp.callback_query(F.data.startswith("del_search_"))
+async def delete_search_callback(callback: CallbackQuery):
+    delete_search(int(callback.data.split("_")[2]))
     await callback.message.edit_text("❌ Поиск удален.")
     await callback.answer()
 
-# Учет сделок (Pro)
+# ================= УЧЕТ СДЕЛОК (PRO) =================
 @dp.message(F.text == "➕ Добавить сделку")
 async def btn_add_deal(msg: Message, state: FSMContext):
     is_active, _, plan = check_subscription(msg.from_user.id)
@@ -576,93 +609,59 @@ async def btn_my_deals(msg: Message):
         await msg.answer("💼 У вас пока нет сохраненных сделок. Нажмите «➕ Добавить сделку», чтобы записать первую!")
         return
 
-    report = f"📊 <b>Ваша бизнес-статистика:</b>\n" \
-             f"• Всего сделок: <b>{total_deals}</b>\n" \
-             f"• Общая чистая прибыль: <b>{total_profit:,} ₽</b>\n\n" \
-             f"📜 <b>Последние сделки:</b>\n"
-    
-    for d_id, title, buy, repair, sell, profit, date in deals[:10]:
-        profit_emoji = "🟢" if profit >= 0 else "🔴"
-        report += f"\n🆔 #{d_id} • <b>{title}</b> ({date})\n" \
-                  f"   Покупка: {buy:,} ₽ | Расходы: {repair:,} ₽\n" \
-                  f"   Продажа: {sell:,} ₽ | Прибыль: {profit_emoji} <b>{profit:,} ₽</b>\n"
-
-    await msg.answer(report, parse_mode="HTML")
-
-@dp.message(F.text == "💎 Подписка / Тарифы")
-async def btn_sub_info(msg: Message):
-    is_active, sub_text, plan = check_subscription(msg.from_user.id)
-    status_emoji = f"🟢 Активна до {sub_text}" if is_active else f"🔴 {sub_text}"
-    max_limit, _ = get_user_search_limit(msg.from_user.id)
-    user_searches_count = len([s for s in get_all_searches() if s[1] == msg.from_user.id])
-    
-    plan_desc = (
-        "<b>📦 Тариф Start:</b> Мониторинг, фильтры (до 3 поисков)" 
-        if plan == "start" 
-        else "<b>🚀 Тариф Pro:</b> Мониторинг + Аналитика + Учёт сделок (до 15 поисков)"
-    )
-    
     await msg.answer(
-        f"🆔 Ваш ID: <code>{msg.from_user.id}</code>\n"
-        f"💎 <b>Статус подписки:</b> {status_emoji}\n"
-        f"⭐️ Уровень тарифа: <b>{plan.upper()}</b>\n"
-        f"{plan_desc}\n"
-        f"📊 Активных поисков: <b>{user_searches_count} из {max_limit}</b>\n\n"
-        f"💡 Для смены тарифа или продления нажмите на синюю кнопку <b>меню (слева от поля ввода)</b> 👇",
+        f"📊 <b>Ваша бизнес-статистика:</b>\n"
+        f"• Всего сделок: <b>{total_deals}</b>\n"
+        f"• Общая чистая прибыль: <b>{total_profit:,} ₽</b>\n\n"
+        f"📜 <b>Список ваших сделок:</b>",
         parse_mode="HTML"
     )
+    
+    for d_id, title, buy, repair, sell, profit, date in deals[:15]:
+        profit_emoji = "🟢" if profit >= 0 else "🔴"
+        text = (
+            f"🆔 #{d_id} • <b>{title}</b> ({date})\n"
+            f"   Покупка: {buy:,} ₽ | Расходы: {repair:,} ₽\n"
+            f"   Продажа: {sell:,} ₽ | Прибыль: {profit_emoji} <b>{profit:,} ₽</b>"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_deal_{d_id}"),
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_deal_{d_id}")
+            ]
+        ])
+        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
-# ================= 5. ФОНОВЫЙ МОНИТОРИНГ =================
-async def monitor_task():
-    while True:
-        try:
-            for s_id, user_id, url, max_price in get_all_searches():
-                is_active, _, _ = check_subscription(user_id)
-                if not is_active:
-                    continue
+# --- Удаление и Редактирование сделки через Callback ---
+@dp.callback_query(F.data.startswith("del_deal_"))
+async def delete_deal_callback(callback: CallbackQuery):
+    deal_id = int(callback.data.split("_")[2])
+    delete_deal(deal_id)
+    await callback.message.edit_text("❌ Сделка успешно удалена.")
+    await callback.answer()
 
-                items = await fetch_ads_direct(url)
-                for item in items:
-                    if not is_item_seen(s_id, item["id"]):
-                        mark_item_as_seen(s_id, item["id"])
-                        if 0 < item["price"] <= max_price:
-                            safe_title = item['title'].replace('<', '&lt;').replace('>', '&gt;')
-                            
-                            # Автоматический аналитический расчет для пользователей с тарифом PRO
-                            _, _, plan = check_subscription(user_id)
-                            analytics_text = ""
-                            if plan == "pro":
-                                estimated_sell = int(item['price'] * 1.15)
-                                estimated_profit = estimated_sell - item['price']
-                                analytics_text = (
-                                    f"\n📈 <b>FlipRadar Analytics (PRO):</b>\n"
-                                    f"• Плановая цена перепродажи: ~<b>{estimated_sell:,} ₽</b>\n"
-                                    f"• Ориентир прибыли: ~<b>{estimated_profit:,} ₽</b>\n"
-                                )
+@dp.callback_query(F.data.startswith("edit_deal_"))
+async def edit_deal_callback(callback: CallbackQuery, state: FSMContext):
+    deal_id = int(callback.data.split("_")[2])
+    deal = get_deal_by_id(deal_id)
+    if not deal:
+        await callback.answer("Сделка не найдена!", show_alert=True)
+        return
+    
+    # Сохраняем ID редактируемой сделки в состояние
+    await state.update_data(editing_deal_id=deal_id)
+    await callback.message.answer(f"✏️ Редактирование сделки #{deal_id} ({deal[2]})\n\nВведите <b>новое название товара</b>:", parse_mode="HTML")
+    await state.set_state(EditDealForm.waiting_for_title)
+    await callback.answer()
 
-                            text = (
-                                f"📌 <b>{safe_title}</b>\n"
-                                f"💰 Цена: <b>{item['price']:,} ₽</b>\n"
-                                f"🌍 {item['location']}\n"
-                                f"🕒 Опубликовано: {item['ad_date']}"
-                                f"{analytics_text}\n"
-                                f"🔗 <a href='{item['url']}'>Открыть на Авито</a>"
-                            )
-                            try:
-                                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
-                            except Exception:
-                                pass
-                await asyncio.sleep(4)
-        except Exception as e:
-            logging.error(f"Ошибка мониторинга: {e}")
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+@dp.message(EditDealForm.waiting_for_title)
+async def process_edit_title(msg: Message, state: FSMContext):
+    await state.update_data(title=msg.text.strip())
+    await msg.answer("💰 Введите <b>новую цену покупки</b> (в рублях):", parse_mode="HTML")
+    await state.set_state(EditDealForm.waiting_for_buy_price)
 
-# ================= 6. ЗАПУСК =================
-async def main():
-    init_db()
-    asyncio.create_task(monitor_task())
-    logging.info("FlipRadar запущен с аналитикой и учетом сделок...")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+@dp.message(EditDealForm.waiting_for_buy_price)
+async def process_edit_buy(msg: Message, state: FSMContext):
+    digits = re.sub(r"\D", "", msg.text)
+    if not digits:
+        await msg.
