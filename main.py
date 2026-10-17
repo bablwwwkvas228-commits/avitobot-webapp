@@ -14,7 +14,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, 
     ReplyKeyboardMarkup, KeyboardButton,
-    PreCheckoutQuery, LabeledPrice
+    PreCheckoutQuery, LabeledPrice, FSInputFile
 )
 
 from curl_cffi.requests import AsyncSession
@@ -24,6 +24,10 @@ from bs4 import BeautifulSoup
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("ОШИБКА: Переменная окружения BOT_TOKEN не задана в настройках хостинга!")
+
+# Вставьте сюда ваш личный Telegram ID (число из /start), чтобы защитить админ-команды!
+# Пока стоит 0 — команды доступны вам для теста, но перед пиаром обязательно впишите свой ID.
+ADMIN_ID = 1704471566
 
 CHECK_INTERVAL_SECONDS = 40
 DB_PATH = "data/bot_database.db"
@@ -86,6 +90,9 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+
+def is_admin(user_id: int) -> bool:
+    return ADMIN_ID == 0 or user_id == ADMIN_ID
 
 def register_user(user_id: int, username: str):
     conn = sqlite3.connect(DB_PATH)
@@ -346,7 +353,7 @@ async def fetch_ads_direct(search_url: str) -> list[dict]:
                     })
                 return results
         except Exception as e:
-            logging.error(f"Попытка {attempt + 1} - Ошибка запроса к Авито: {e}")
+            logging.error(f"Попытка {attempt + 1}: Ошибка запроса к Авито: {e}")
             await asyncio.sleep(5)
     return results
 
@@ -435,6 +442,8 @@ async def cmd_start(msg: Message):
 
 @dp.message(Command("give_sub"))
 async def cmd_give_sub(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
     parts = msg.text.split()
     if len(parts) < 3:
         await msg.answer("ℹ️ Использование: <code>/give_sub ID_пользователя дни [start/pro]</code>", parse_mode="HTML")
@@ -620,7 +629,7 @@ async def btn_my_deals(msg: Message):
     for d_id, title, buy, repair, sell, profit, date in deals[:15]:
         profit_emoji = "🟢" if profit >= 0 else "🔴"
         text = (
-            f"🆔 #{d_id} • <b>{title}</b> ({date})\n"
+            f"🆔 #{d_id} <b>{title}</b> ({date})\n"
             f"   Покупка: {buy:,} ₽ | Расходы: {repair:,} ₽\n"
             f"   Продажа: {sell:,} ₽ | Прибыль: {profit_emoji} <b>{profit:,} ₽</b>"
         )
@@ -648,7 +657,6 @@ async def edit_deal_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Сделка не найдена!", show_alert=True)
         return
     
-    # Сохраняем ID редактируемой сделки в состояние
     await state.update_data(editing_deal_id=deal_id)
     await callback.message.answer(f"✏️ Редактирование сделки #{deal_id} ({deal[2]})\n\nВведите <b>новое название товара</b>:", parse_mode="HTML")
     await state.set_state(EditDealForm.waiting_for_title)
@@ -769,34 +777,62 @@ async def monitor_task():
             logging.error(f"Ошибка мониторинга: {e}")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
-# --- УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ ЧЕРЕЗ TELEGRAM ---
+# --- УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ И АДМИНКА ЧЕРЕЗ TELEGRAM ---
 
-# 1. Скачать актуальную базу с хостинга (команда /get_db)
+# 1. Быстрая статистика базы прямо в Telegram (команда /stats)
+@dp.message(Command("stats"))
+async def cmd_stats(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    users_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM users WHERE plan = 'pro'")
+    pro_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM searches")
+    searches_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM deals")
+    deals_count = cursor.fetchone()[0]
+    conn.close()
+
+    await msg.answer(
+        f"📊 <b>Статистика базы на хостинге:</b>\n\n"
+        f"👥 Всего пользователей: <b>{users_count}</b> (из них PRO: <b>{pro_count}</b>)\n"
+        f"🔍 Активных поисков: <b>{searches_count}</b>\n"
+        f"💼 Записанных сделок: <b>{deals_count}</b>\n\n"
+        f"📥 Скачать базу для DBeaver: /get_db\n"
+        f"🎁 Выдать подписку: <code>/give_sub ID дни pro</code>",
+        parse_mode="HTML"
+    )
+
+# 2. Скачать актуальную базу с хостинга (команда /get_db)
 @dp.message(Command("get_db"))
 async def cmd_get_db(msg: Message):
-    db_file_path = "data/bot_database.db"
-    if os.path.exists(db_file_path):
-        from aiogram.types import FSInputFile
-        document = FSInputFile(db_file_path)
+    if not is_admin(msg.from_user.id):
+        return
+    if os.path.exists(DB_PATH):
+        document = FSInputFile(DB_PATH)
         await msg.answer_document(document, caption="📦 Вот актуальный файл базы данных с хостинга!")
     else:
         await msg.answer("❌ Файл базы данных еще не найден.")
 
-# 2. Загрузить измененную в DBeaver базу обратно на хостинг (просто отправьте файл боту)
+# 3. Загрузить измененную в DBeaver базу обратно на хостинг (просто отправьте файл боту)
 @dp.message(F.document)
 async def upload_db_handler(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
     if msg.document.file_name == "bot_database.db":
         os.makedirs("data", exist_ok=True)
         file = await msg.bot.get_file(msg.document.file_id)
-        await msg.bot.download_file(file.file_path, "data/bot_database.db")
+        await msg.bot.download_file(file.file_path, DB_PATH)
         await msg.answer("✅ База данных на хостинге успешно обновлена!")
 
-# ----------------------------------------------
 # ================= 6. ЗАПУСК =================
 async def main():
     init_db()
     asyncio.create_task(monitor_task())
-    logging.info("FlipRadar запущен с управлением сделками...")
+    logging.info("FlipRadar запущен с управлением сделками и БД...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
